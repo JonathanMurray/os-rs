@@ -15,19 +15,27 @@ struct FileEntry {
     inode: usize,
     path: String,
     file: File,
+    permissions: FilePermissions,
 }
 
-#[derive(Debug)]
+#[derive(PartialEq, Debug, Copy, Clone)]
+pub enum FilePermissions {
+    ReadWrite,
+    ReadOnly,
+}
+
+#[derive(PartialEq, Debug)]
+pub struct FileStat {
+    pub file_type: FileType,
+    pub size: Option<usize>,
+    pub permissions: FilePermissions,
+}
+
+#[derive(Debug, Copy, Clone)]
 struct OpenFile {
     inode: usize,
     fd: usize,
     offset: usize,
-}
-
-#[derive(Debug)]
-pub struct FileStat {
-    pub file_type: FileType,
-    pub size: Option<usize>,
 }
 
 impl System {
@@ -36,30 +44,53 @@ impl System {
             inode: 0,
             path: "/".to_owned(),
             file: File::new_dir(),
+            permissions: FilePermissions::ReadOnly,
         };
-        Self {
+        let mut sys = Self {
             files: vec![root_dir],
             next_inode: 1,
             open_files: Default::default(),
             next_fd: 0,
+        };
+        sys.create("/syslog", FileType::Regular, FilePermissions::ReadOnly)
+            .unwrap();
+        sys
+    }
+
+    fn log(&mut self, msg: &str) {
+        if let Ok(file_entry) = self._find_file("/syslog") {
+            if let File::Regular(f) = &mut file_entry.file {
+                f.content.extend_from_slice(msg.as_bytes());
+                f.content.push('\n' as u8);
+            }
         }
     }
 
-    pub fn create<S: Into<String>>(&mut self, path: S, file_type: FileType) -> Result<()> {
+    pub fn create<S: Into<String>>(
+        &mut self,
+        path: S,
+        file_type: FileType,
+        permissions: FilePermissions,
+    ) -> Result<()> {
         let path = path.into();
-
+        self.log(&format!("create({}, {:?})", path, file_type));
         let inode = self.next_inode;
         self.next_inode += 1;
-
-        let parent = self._parent_dir(&path)?;
-        parent.children.push(inode);
+        self._parent_dir(&path)?.children.push(inode);
         let file = File::new(file_type);
-        self.files.push(FileEntry { inode, path, file });
+        self.files.push(FileEntry {
+            inode,
+            path,
+            file,
+            permissions,
+        });
         Ok(())
     }
 
     pub fn rename<S: Into<String>>(&mut self, old_path: &str, new_path: S) -> Result<()> {
+        //TODO permissions
         let new_path = new_path.into();
+        self.log(&format!("rename({}, {})", old_path, &new_path));
         let file = self._find_file(old_path)?;
         file.path = new_path.clone();
         let inode = file.inode;
@@ -72,7 +103,12 @@ impl System {
     }
 
     pub fn remove(&mut self, path: &str) -> Result<()> {
-        let inode = self._find_file(path)?.inode;
+        //TODO handle removing directories
+        let file_entry = self._find_file(path)?;
+        if file_entry.permissions == FilePermissions::ReadOnly {
+            return Err("Not permitted to remove file".to_owned());
+        }
+        let inode = file_entry.inode;
         self.files.retain(|f| f.path != path);
         let parent = self._parent_dir(path)?;
         parent.children.retain(|child| *child != inode);
@@ -80,6 +116,7 @@ impl System {
     }
 
     pub fn open(&mut self, path: &str) -> Result<usize> {
+        self.log(&format!("open({})", path));
         let inode = self._find_file(path)?.inode;
         let fd = self.next_fd;
         self.next_fd += 1;
@@ -92,11 +129,14 @@ impl System {
     }
 
     pub fn close(&mut self, fd: usize) -> Result<()> {
+        self.log(&format!("close({})", fd));
         self.open_files.retain(|f| f.fd != fd);
         Ok(())
     }
 
     pub fn write(&mut self, fd: usize, buf: &[u8]) -> Result<()> {
+        //TODO permissions
+        self.log(&format!("write({}, ...)", fd));
         let open_file = self
             .open_files
             .iter_mut()
@@ -122,6 +162,7 @@ impl System {
     }
 
     pub fn read(&mut self, fd: usize, buf: &mut [u8]) -> Result<usize> {
+        let syslog_inode = self._find_file("/syslog").expect("No syslog file").inode;
         let open_file = self
             .open_files
             .iter_mut()
@@ -134,7 +175,7 @@ impl System {
             .ok_or_else(|| "fd pointing to non-existent file".to_owned())?
             .file;
 
-        if let File::Regular(f) = f {
+        let result = if let File::Regular(f) = f {
             let mut cursor = Cursor::new(&f.content);
             cursor.set_position(open_file.offset as u64);
             let num_read = cursor.read(buf).expect("Failed to read from file");
@@ -142,10 +183,16 @@ impl System {
             Ok(num_read)
         } else {
             Err("Can't read directory".to_owned())
+        };
+        if open_file.inode != syslog_inode {
+            //Don't log syslog reads, as that may cause an infinite read
+            self.log(&format!("read({}, ...)", fd));
         }
+        result
     }
 
     pub fn seek(&mut self, fd: usize, offset: usize) -> Result<()> {
+        self.log(&format!("seek({}, {})", fd, offset));
         let open_file = self
             .open_files
             .iter_mut()
@@ -155,27 +202,31 @@ impl System {
         Ok(())
     }
 
-    pub fn stat(&self, path: &str) -> Result<FileStat> {
-        let f = &self
+    pub fn stat(&mut self, path: &str) -> Result<FileStat> {
+        self.log(&format!("stat({})", path));
+        let file_entry = &self
             .files
             .iter()
             .find(|f| f.path == path)
-            .ok_or_else(|| "File not found".to_owned())?
-            .file;
-        if let File::Regular(f) = f {
+            .ok_or_else(|| "File not found".to_owned())?;
+        let permissions = file_entry.permissions;
+        if let File::Regular(f) = &file_entry.file {
             Ok(FileStat {
                 file_type: FileType::Regular,
                 size: Some(f.content.len()),
+                permissions,
             })
         } else {
             Ok(FileStat {
                 file_type: FileType::Directory,
                 size: None,
+                permissions,
             })
         }
     }
 
-    pub fn list_dir(&self, path: &str) -> Result<Vec<String>> {
+    pub fn list_dir(&mut self, path: &str) -> Result<Vec<String>> {
+        self.log(&format!("list_dir({})", path));
         let f = &self
             .files
             .iter()
@@ -273,57 +324,67 @@ mod tests {
     #[test]
     fn create_file() {
         let mut sys = System::new();
-        sys.create("/myfile", FileType::Regular);
+        sys.create("/myfile", FileType::Regular, FilePermissions::ReadWrite)
+            .unwrap();
     }
 
     #[test]
     fn move_file_between_directories() {
         let mut sys = System::new();
-        sys.create("/myfile", FileType::Regular);
-        assert_eq!(sys.list_dir("/").unwrap(), vec!["/myfile"]);
-        sys.create("/dir", FileType::Directory);
-        assert_eq!(sys.list_dir("/").unwrap(), vec!["/myfile", "/dir"]);
-        sys.rename("/myfile", "/dir/moved");
-        assert_eq!(sys.list_dir("/").unwrap(), vec!["/dir"]);
+        sys.create("/myfile", FileType::Regular, FilePermissions::ReadWrite)
+            .unwrap();
+        assert_eq!(sys.list_dir("/").unwrap(), vec!["/syslog", "/myfile"]);
+        sys.create("/dir", FileType::Directory, FilePermissions::ReadWrite)
+            .unwrap();
+        assert_eq!(
+            sys.list_dir("/").unwrap(),
+            vec!["/syslog", "/myfile", "/dir"]
+        );
+        sys.rename("/myfile", "/dir/moved").unwrap();
+        assert_eq!(sys.list_dir("/").unwrap(), vec!["/syslog", "/dir"]);
         assert_eq!(sys.list_dir("/dir").unwrap(), vec!["/dir/moved"]);
     }
 
     #[test]
     fn write_seek_read() {
         let mut sys = System::new();
-        sys.create("/myfile", FileType::Regular);
-        let fd = sys.open("/myfile");
-        sys.write(fd, &[0, 10, 20, 30]);
+        sys.create("/myfile", FileType::Regular, FilePermissions::ReadWrite)
+            .unwrap();
+        let fd = sys.open("/myfile").unwrap();
+        sys.write(fd, &[0, 10, 20, 30]).unwrap();
         let buf = &mut [0, 0];
-        sys.seek(fd, 1);
-        let mut n = sys.read(fd, buf);
+        sys.seek(fd, 1).unwrap();
+        let mut n = sys.read(fd, buf).unwrap();
         assert_eq!(buf, &[10, 20]);
         assert_eq!(n, 2);
-        n = sys.read(fd, buf);
+        n = sys.read(fd, buf).unwrap();
         assert_eq!(buf, &[30, 20]);
         assert_eq!(n, 1);
-        n = sys.read(fd, buf);
+        n = sys.read(fd, buf).unwrap();
         assert_eq!(n, 0);
     }
 
     #[test]
     fn stat_file() {
         let mut sys = System::new();
-        sys.create("/myfile", FileType::Regular);
+        sys.create("/myfile", FileType::Regular, FilePermissions::ReadWrite)
+            .unwrap();
         assert_eq!(
             sys.stat("/myfile").unwrap(),
             FileStat {
                 file_type: FileType::Regular,
-                size: 0
+                size: Some(0),
+                permissions: FilePermissions::ReadWrite,
             }
         );
-        let fd = sys.open("/myfile");
-        sys.write(fd, &[1, 2, 3]);
+        let fd = sys.open("/myfile").unwrap();
+        sys.write(fd, &[1, 2, 3]).unwrap();
         assert_eq!(
             sys.stat("/myfile").unwrap(),
             FileStat {
                 file_type: FileType::Regular,
-                size: 3
+                size: Some(3),
+                permissions: FilePermissions::ReadWrite,
             }
         );
     }
