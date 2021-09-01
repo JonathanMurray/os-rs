@@ -12,6 +12,9 @@ fn main() {
     sys.close(readme).unwrap();
     let stdin = io::stdin();
     let mut stdout = io::stdout();
+    println!("Welcome to the Operating System!");
+
+    //TODO Treat the loop below as its own process. Run other things in parallel.
     loop {
         print!("> ");
         stdout.flush().unwrap();
@@ -21,10 +24,12 @@ fn main() {
         match words.get(0) {
             Some(&"stat") => stat(&words, &mut sys),
             Some(&"cat") => cat(&words, &mut sys),
-            Some(&"ls") => ls(&mut sys),
+            Some(&"ls") => ls(&words, &mut sys),
             Some(&"touch") => touch(&words, &mut sys),
             Some(&"mkdir") => mkdir(&words, &mut sys),
             Some(&"rm") => rm(&words, &mut sys),
+            Some(&"mv") => mv(&words, &mut sys),
+            Some(&"cd") => cd(&words, &mut sys),
             None => {}
             _ => println!("Unknown command"),
         }
@@ -65,7 +70,7 @@ fn stat(args: &[&str], sys: &mut System) {
 
 fn cat(args: &[&str], sys: &mut System) {
     if let Some(&path) = args.get(1) {
-        match sys.open(&path) {
+        match sys.open(path) {
             Ok(fd) => {
                 loop {
                     let mut buf = vec![0, 0, 0];
@@ -86,8 +91,21 @@ fn cat(args: &[&str], sys: &mut System) {
     }
 }
 
-fn ls(sys: &mut System) {
-    println!("{}", sys.list_dir("/").unwrap().join(" "));
+fn ls(args: &[&str], sys: &mut System) {
+    let path: &str = args.get(1).unwrap_or(&".");
+    match sys.stat(path) {
+        Ok(stat) => {
+            if stat.file_type == FileType::Regular {
+                println!("{}", path); //TODO
+            } else {
+                match sys.list_dir(path) {
+                    Ok(children) => println!("{}", children.join(" ")),
+                    Err(e) => println!("Error: {}", e),
+                };
+            }
+        }
+        Err(e) => println!("Error: {}", e),
+    }
 }
 
 fn touch(args: &[&str], sys: &mut System) {
@@ -120,5 +138,27 @@ fn rm(args: &[&str], sys: &mut System) {
         }
     } else {
         println!("Error: missing arg");
+    }
+}
+
+fn mv(args: &[&str], sys: &mut System) {
+    if let (Some(&src_path), Some(&dst_path)) = (args.get(1), args.get(2)) {
+        match sys.rename(src_path, dst_path) {
+            Ok(_) => println!("File moved"),
+            Err(e) => println!("Error: {}", e),
+        }
+    } else {
+        println!("Error: missing arg(s)");
+    }
+}
+
+fn cd(args: &[&str], sys: &mut System) {
+    let result = if let Some(&path) = args.get(1) {
+        sys.chdir(path)
+    } else {
+        sys.chdir("/")
+    };
+    if let Err(e) = result {
+        println!("Error: {}", e);
     }
 }

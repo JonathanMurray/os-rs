@@ -4,16 +4,15 @@ type Result<T> = core::result::Result<T, String>;
 
 #[derive(Debug)]
 pub struct System {
-    files: Vec<FileEntry>,
-    next_inode: usize,
-    open_files: Vec<OpenFile>,
-    next_fd: usize,
+    inodes: Vec<Inode>,
+    next_inode_number: usize,
+    process: Process,
 }
 
 #[derive(Debug)]
-struct FileEntry {
-    inode: usize,
-    path: String,
+struct Inode {
+    inode_number: usize,
+    path: Path,
     file: File,
     permissions: FilePermissions,
 }
@@ -31,26 +30,75 @@ pub struct FileStat {
     pub permissions: FilePermissions,
 }
 
+#[derive(Debug)]
+struct Process {
+    open_files: Vec<OpenFile>,
+    next_fd: usize,
+    cwd: usize,
+}
+
+impl Process {
+    fn open_file_mut(&mut self, fd: usize) -> Result<&mut OpenFile> {
+        self.open_files
+            .iter_mut()
+            .find(|f| f.fd == fd)
+            .ok_or_else(|| format!("No such fd: {}", fd))
+    }
+}
+
 #[derive(Debug, Copy, Clone)]
 struct OpenFile {
-    inode: usize,
+    inode_number: usize,
     fd: usize,
     offset: usize,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct Path(String);
+
+// A canonical absolute path
+impl Path {
+    pub fn resolve(mut self, relative_path: &str) -> Self {
+        if relative_path == "." {
+            return self;
+        }
+        if !self.0.ends_with('/') {
+            self.0.push('/');
+        }
+        self.0.push_str(relative_path);
+        self
+    }
+
+    pub fn parent(&self) -> Self {
+        let (mut parent_path, _) = self
+            .0
+            .rsplit_once('/')
+            .expect("canonical path must have parent");
+        if parent_path.is_empty() {
+            parent_path = "/";
+        }
+        Path(parent_path.to_owned())
+    }
+}
+
 impl System {
     pub fn new() -> Self {
-        let root_dir = FileEntry {
-            inode: 0,
-            path: "/".to_owned(),
+        let root_inode_number = 0;
+        let root_dir = Inode {
+            inode_number: root_inode_number,
+            path: Path("/".to_owned()),
             file: File::new_dir(),
             permissions: FilePermissions::ReadOnly,
         };
-        let mut sys = Self {
-            files: vec![root_dir],
-            next_inode: 1,
+        let process = Process {
             open_files: Default::default(),
             next_fd: 0,
+            cwd: root_inode_number,
+        };
+        let mut sys = Self {
+            inodes: vec![root_dir],
+            next_inode_number: 1,
+            process,
         };
         sys.create("/syslog", FileType::Regular, FilePermissions::ReadOnly)
             .unwrap();
@@ -58,10 +106,10 @@ impl System {
     }
 
     fn log(&mut self, msg: &str) {
-        if let Ok(file_entry) = self._find_file("/syslog") {
+        if let Ok(file_entry) = self.inode_mut_from_path(&Path("/syslog".to_owned())) {
             if let File::Regular(f) = &mut file_entry.file {
                 f.content.extend_from_slice(msg.as_bytes());
-                f.content.push('\n' as u8);
+                f.content.push(b'\n');
             }
         }
     }
@@ -73,13 +121,14 @@ impl System {
         permissions: FilePermissions,
     ) -> Result<()> {
         let path = path.into();
-        self.log(&format!("create({}, {:?})", path, file_type));
-        let inode = self.next_inode;
-        self.next_inode += 1;
-        self._parent_dir(&path)?.children.push(inode);
+        self.log(&format!("create({:?}, {:?})", path, file_type));
+        let path = self._resolve_path(path);
+        let inode_number = self.next_inode_number;
+        self.next_inode_number += 1;
+        self._parent_dir(&path)?.children.push(inode_number);
         let file = File::new(file_type);
-        self.files.push(FileEntry {
-            inode,
+        self.inodes.push(Inode {
+            inode_number,
             path,
             file,
             permissions,
@@ -88,40 +137,49 @@ impl System {
     }
 
     pub fn rename<S: Into<String>>(&mut self, old_path: &str, new_path: S) -> Result<()> {
-        //TODO permissions
+        //TODO: handle replacing existing file
         let new_path = new_path.into();
         self.log(&format!("rename({}, {})", old_path, &new_path));
-        let file = self._find_file(old_path)?;
-        file.path = new_path.clone();
-        let inode = file.inode;
+        let old_path = self._resolve_path(old_path);
+        let new_path = self._resolve_path(new_path);
+        let file = self.inode_mut_from_path(&old_path)?;
+        if file.permissions == FilePermissions::ReadOnly {
+            return Err("Not permitted to rename file".to_owned());
+        }
 
-        let old_parent = self._parent_dir(old_path)?;
-        old_parent.children.retain(|child| *child != inode);
+        file.path = new_path.clone();
+        let inode_number = file.inode_number;
+
+        let old_parent = self._parent_dir(&old_path)?;
+        old_parent.children.retain(|child| *child != inode_number);
         let new_parent = self._parent_dir(&new_path)?;
-        new_parent.children.push(inode);
+        new_parent.children.push(inode_number);
         Ok(())
     }
 
     pub fn remove(&mut self, path: &str) -> Result<()> {
         //TODO handle removing directories
-        let file_entry = self._find_file(path)?;
+        self.log(&format!("remove({})", path));
+        let path = self._resolve_path(path);
+        let file_entry = self.inode_mut_from_path(&path)?;
         if file_entry.permissions == FilePermissions::ReadOnly {
             return Err("Not permitted to remove file".to_owned());
         }
-        let inode = file_entry.inode;
-        self.files.retain(|f| f.path != path);
-        let parent = self._parent_dir(path)?;
-        parent.children.retain(|child| *child != inode);
+        let inode_number = file_entry.inode_number;
+        self.inodes.retain(|f| f.path != path);
+        let parent = self._parent_dir(&path)?;
+        parent.children.retain(|child| *child != inode_number);
         Ok(())
     }
 
     pub fn open(&mut self, path: &str) -> Result<usize> {
         self.log(&format!("open({})", path));
-        let inode = self._find_file(path)?.inode;
-        let fd = self.next_fd;
-        self.next_fd += 1;
-        self.open_files.push(OpenFile {
-            inode,
+        let path = self._resolve_path(path);
+        let inode_number = self.inode_mut_from_path(&path)?.inode_number;
+        let fd = self.process.next_fd;
+        self.process.next_fd += 1;
+        self.process.open_files.push(OpenFile {
+            inode_number,
             fd,
             offset: 0,
         });
@@ -130,22 +188,18 @@ impl System {
 
     pub fn close(&mut self, fd: usize) -> Result<()> {
         self.log(&format!("close({})", fd));
-        self.open_files.retain(|f| f.fd != fd);
+        self.process.open_files.retain(|f| f.fd != fd);
         Ok(())
     }
 
     pub fn write(&mut self, fd: usize, buf: &[u8]) -> Result<()> {
         //TODO permissions
         self.log(&format!("write({}, ...)", fd));
-        let open_file = self
-            .open_files
-            .iter_mut()
-            .find(|f| f.fd == fd)
-            .ok_or_else(|| "Invalid fd".to_owned())?;
+        let open_file = self.process.open_file_mut(fd)?;
         let f = &mut self
-            .files
+            .inodes
             .iter_mut()
-            .find(|f| f.inode == open_file.inode)
+            .find(|f| f.inode_number == open_file.inode_number)
             .ok_or_else(|| "fd pointing to non-existent file".to_owned())?
             .file;
         if let File::Regular(ref mut f) = f {
@@ -162,16 +216,15 @@ impl System {
     }
 
     pub fn read(&mut self, fd: usize, buf: &mut [u8]) -> Result<usize> {
-        let syslog_inode = self._find_file("/syslog").expect("No syslog file").inode;
-        let open_file = self
-            .open_files
-            .iter_mut()
-            .find(|f| f.fd == fd)
-            .ok_or_else(|| "Invalid fd".to_owned())?;
+        let syslog_inode_number = self
+            .inode_mut_from_path(&Path("/syslog".to_owned()))
+            .expect("No syslog file")
+            .inode_number;
+        let open_file = self.process.open_file_mut(fd)?;
         let f = &self
-            .files
+            .inodes
             .iter()
-            .find(|f| f.inode == open_file.inode)
+            .find(|f| f.inode_number == open_file.inode_number)
             .ok_or_else(|| "fd pointing to non-existent file".to_owned())?
             .file;
 
@@ -184,7 +237,7 @@ impl System {
         } else {
             Err("Can't read directory".to_owned())
         };
-        if open_file.inode != syslog_inode {
+        if open_file.inode_number != syslog_inode_number {
             //Don't log syslog reads, as that may cause an infinite read
             self.log(&format!("read({}, ...)", fd));
         }
@@ -193,22 +246,15 @@ impl System {
 
     pub fn seek(&mut self, fd: usize, offset: usize) -> Result<()> {
         self.log(&format!("seek({}, {})", fd, offset));
-        let open_file = self
-            .open_files
-            .iter_mut()
-            .find(|f| f.fd == fd)
-            .ok_or_else(|| "Invalid fd".to_owned())?;
+        let open_file = self.process.open_file_mut(fd)?;
         open_file.offset = offset;
         Ok(())
     }
 
     pub fn stat(&mut self, path: &str) -> Result<FileStat> {
         self.log(&format!("stat({})", path));
-        let file_entry = &self
-            .files
-            .iter()
-            .find(|f| f.path == path)
-            .ok_or_else(|| "File not found".to_owned())?;
+        let path = self._resolve_path(path);
+        let file_entry = self.inode_mut_from_path(&path)?;
         let permissions = file_entry.permissions;
         if let File::Regular(f) = &file_entry.file {
             Ok(FileStat {
@@ -225,51 +271,83 @@ impl System {
         }
     }
 
-    pub fn list_dir(&mut self, path: &str) -> Result<Vec<String>> {
+    pub fn list_dir<S: Into<String>>(&mut self, path: S) -> Result<Vec<String>> {
+        let path = path.into();
         self.log(&format!("list_dir({})", path));
+        let path = self._resolve_path(path);
         let f = &self
-            .files
+            .inodes
             .iter()
             .find(|f| f.path == path)
-            .ok_or_else(|| "Directory not found".to_owned())?
+            .ok_or_else(|| format!("Directory not found: '{:?}'", path))?
             .file;
         let mut child_names = Vec::new();
         if let File::Dir(dir) = f {
-            for id in &dir.children {
+            for &id in &dir.children {
                 let name = self
-                    .files
-                    .iter()
-                    .find(|f| f.inode == *id)
-                    .expect("Directory child with inode")
+                    .inode_from_number(id)
+                    .expect("child with valid inode")
                     .path
+                    .0
                     .clone();
                 child_names.push(name);
             }
             Ok(child_names)
         } else {
-            Err(format!("Can't read file as directory: {}", path))
+            Err(format!("Can't read file as directory: {:?}", path))
         }
     }
 
-    fn _parent_dir(&mut self, path: &str) -> Result<&mut Directory> {
-        let (mut parent_path, _name) = path
-            .rsplit_once('/')
-            .ok_or_else(|| "File has no parent".to_owned())?;
-        if parent_path == "" {
-            parent_path = "/";
+    pub fn chdir<S: Into<String>>(&mut self, path: S) -> Result<()> {
+        let path = path.into();
+        self.log(&format!("chdir({})", path));
+        let path = self._resolve_path(path);
+        let inode = &self
+            .inodes
+            .iter()
+            .find(|f| f.path == path)
+            .ok_or_else(|| format!("Directory not found: '{:?}'", path))?;
+        if let File::Dir(_) = &inode.file {
+            self.process.cwd = inode.inode_number;
+            Ok(())
+        } else {
+            Err(format!("Not a directory: {:?}", path))
         }
-        let parent = &mut self._find_file(parent_path)?.file;
+    }
+
+    fn _parent_dir(&mut self, path: &Path) -> Result<&mut Directory> {
+        let parent_path = path.parent();
+        let parent = &mut self.inode_mut_from_path(&parent_path)?.file;
         match parent {
             File::Dir(ref mut dir) => Ok(dir),
-            File::Regular(_) => Err(format!("{} is not a directory", parent_path)),
+            File::Regular(_) => Err(format!("{:?} is not a directory", parent_path)),
         }
     }
 
-    fn _find_file(&mut self, path: &str) -> Result<&mut FileEntry> {
-        self.files
+    fn inode_mut_from_path(&mut self, path: &Path) -> Result<&mut Inode> {
+        self.inodes
             .iter_mut()
-            .find(|f| f.path == path)
-            .ok_or_else(|| "File not found".to_owned())
+            .find(|f| &f.path == path)
+            .ok_or_else(|| format!("No inode with path: '{:?}'", path))
+    }
+
+    fn inode_from_number(&self, inode_number: usize) -> Result<&Inode> {
+        self.inodes
+            .iter()
+            .find(|f| f.inode_number == inode_number)
+            .ok_or_else(|| format!("No inode with number: {}", inode_number))
+    }
+
+    fn _resolve_path<S: Into<String>>(&self, path: S) -> Path {
+        let path = path.into();
+        if path.starts_with('/') {
+            // it's an absolute path
+            Path(path)
+        } else {
+            let cwd = self.process.cwd;
+            let cwd_inode = self.inode_from_number(cwd).expect("cwd valid inode");
+            cwd_inode.path.clone().resolve(&path)
+        }
     }
 }
 
@@ -322,14 +400,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn create_file() {
+    fn create() {
         let mut sys = System::new();
         sys.create("/myfile", FileType::Regular, FilePermissions::ReadWrite)
             .unwrap();
     }
 
     #[test]
-    fn move_file_between_directories() {
+    fn rename_moving_file_between_directories() {
         let mut sys = System::new();
         sys.create("/myfile", FileType::Regular, FilePermissions::ReadWrite)
             .unwrap();
@@ -343,6 +421,16 @@ mod tests {
         sys.rename("/myfile", "/dir/moved").unwrap();
         assert_eq!(sys.list_dir("/").unwrap(), vec!["/syslog", "/dir"]);
         assert_eq!(sys.list_dir("/dir").unwrap(), vec!["/dir/moved"]);
+    }
+
+    #[test]
+    fn rename_with_relative_paths() {
+        let mut sys = System::new();
+        sys.create("/myfile", FileType::Regular, FilePermissions::ReadWrite)
+            .unwrap();
+        assert_eq!(sys.list_dir("/").unwrap(), vec!["/syslog", "/myfile"]);
+        sys.rename("myfile", "new_name").unwrap();
+        assert_eq!(sys.list_dir("/").unwrap(), vec!["/syslog", "/new_name"]);
     }
 
     #[test]
@@ -387,5 +475,16 @@ mod tests {
                 permissions: FilePermissions::ReadWrite,
             }
         );
+    }
+
+    #[test]
+    fn chdir() {
+        let mut sys = System::new();
+        sys.create("/dir", FileType::Directory, FilePermissions::ReadWrite)
+            .unwrap();
+        sys.create("dir/x", FileType::Regular, FilePermissions::ReadWrite)
+            .unwrap();
+        sys.chdir("/dir").unwrap();
+        assert_eq!(sys.list_dir(".").unwrap(), vec!["/dir/x"]);
     }
 }
