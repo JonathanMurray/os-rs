@@ -79,6 +79,10 @@ impl Path {
         }
         Path(parent_path.to_owned())
     }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl System {
@@ -313,6 +317,14 @@ impl System {
         } else {
             Err(format!("Not a directory: {:?}", path))
         }
+    }
+
+    pub fn get_current_dir_name(&mut self) -> &Path {
+        self.log("get_current_dir_name()");
+        let cwd_inode = self
+            .inode_from_number(self.process.cwd)
+            .expect("cwd valid inode");
+        &cwd_inode.path
     }
 
     fn _parent_dir(&mut self, path: &Path) -> Result<&mut Directory> {

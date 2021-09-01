@@ -16,7 +16,7 @@ fn main() {
 
     //TODO Treat the loop below as its own process. Run other things in parallel.
     loop {
-        print!("> ");
+        print!("{}$ ", sys.get_current_dir_name().as_str());
         stdout.flush().unwrap();
         let mut input = String::new();
         stdin.read_line(&mut input).unwrap();
