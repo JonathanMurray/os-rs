@@ -24,7 +24,7 @@ fn run_background_proc(sys: Arc<Mutex<System>>) {
         .expect("Create uptime file");
     let fd = proc.open("/uptime").expect("Open uptime file");
     let mut secs = 0_u64;
-    loop {
+    for _ in 0..5{
         std::thread::sleep(Duration::from_secs(1));
         secs += 1;
         proc.seek(fd, 0).expect("Seek in uptime file");

@@ -10,7 +10,8 @@ pub struct System {
     next_inode_number: u32,
     status_virtual_inode_number: u32,
     startup_time: Instant,
-    num_processes: u32,
+    pids: Vec<u32>,
+    next_pid: u32,
 }
 
 #[derive(Debug)]
@@ -36,6 +37,7 @@ pub struct FileStat {
 
 #[derive(Debug)]
 pub struct Process {
+    pid: u32,
     sys: Option<Arc<Mutex<System>>>,
     open_files: Vec<OpenFile>,
     next_fd: u32,
@@ -122,15 +124,21 @@ impl System {
             next_inode_number: 4,
             status_virtual_inode_number: 3,
             startup_time: Instant::now(),
-            num_processes: 0,
+            pids: vec![],
+            next_pid: 0,
         }
     }
 
     pub fn spawn_process(sys: Arc<Mutex<Self>>) -> Process {
-        sys.lock()
-            .expect("lock sys when spawning process")
-            .num_processes += 1;
+        let pid = {
+            let mut sys = sys.lock().expect("lock sys when spawning process");
+            let pid = sys.next_pid;
+            sys.pids.push(pid);
+            sys.next_pid += 1;
+            pid
+        };
         Process {
+            pid,
             sys: Some(sys),
             open_files: Default::default(),
             next_fd: 0,
@@ -163,9 +171,11 @@ impl System {
                     //Gives different data on subsequent reads of the same fd
                     //which is not great. The newline can be lost for example.
                     let uptime = Instant::now().duration_since(self.startup_time);
-                    let content = format!("Uptime: {:.2}\nProcesses: {}\n", 
+                    let content = format!(
+                        "Uptime: {:.2}\nProcesses: {:?}\n",
                         uptime.as_secs_f32(),
-                        self.num_processes);
+                        self.pids
+                    );
                     let mut cursor = Cursor::new(&content);
                     cursor.set_position(offset as u64);
                     let num_read = cursor.read(buf).expect("Failed to read from file");
@@ -464,6 +474,13 @@ impl Process {
             let cwd_inode = sys.inode_from_number(cwd).expect("cwd valid inode");
             cwd_inode.path.clone().resolve(&path)
         }
+    }
+}
+
+impl Drop for Process {
+    fn drop(&mut self) {
+        let mut sys = self.sys.as_ref().expect("some sys").lock().unwrap();
+        sys.pids.retain(|pid| pid != &self.pid);
     }
 }
 
