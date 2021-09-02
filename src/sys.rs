@@ -8,8 +8,9 @@ type Result<T> = core::result::Result<T, String>;
 pub struct System {
     inodes: Vec<Inode>,
     next_inode_number: u32,
-    uptime_virtual_inode_number: u32,
+    status_virtual_inode_number: u32,
     startup_time: Instant,
+    num_processes: u32,
 }
 
 #[derive(Debug)]
@@ -102,9 +103,9 @@ impl System {
             file: File::new_dir(),
             permissions: FilePermissions::ReadOnly,
         };
-        let uptime_file = Inode {
+        let status_file = Inode {
             inode_number: 3,
-            path: Path("/proc/uptime".to_owned()),
+            path: Path("/proc/status".to_owned()),
             file: File::Virtual,
             permissions: FilePermissions::ReadOnly,
         };
@@ -114,17 +115,21 @@ impl System {
             dir.children.push(proc_dir.inode_number);
         }
         if let File::Dir(dir) = &mut proc_dir.file {
-            dir.children.push(uptime_file.inode_number);
+            dir.children.push(status_file.inode_number);
         }
         Self {
-            inodes: vec![root_dir, syslog_file, proc_dir, uptime_file],
+            inodes: vec![root_dir, syslog_file, proc_dir, status_file],
             next_inode_number: 4,
-            uptime_virtual_inode_number: 3,
+            status_virtual_inode_number: 3,
             startup_time: Instant::now(),
+            num_processes: 0,
         }
     }
 
     pub fn spawn_process(sys: Arc<Mutex<Self>>) -> Process {
+        sys.lock()
+            .expect("lock sys when spawning process")
+            .num_processes += 1;
         Process {
             sys: Some(sys),
             open_files: Default::default(),
@@ -154,11 +159,13 @@ impl System {
                 Ok(num_read)
             }
             File::Virtual => {
-                if inode_number == self.uptime_virtual_inode_number {
+                if inode_number == self.status_virtual_inode_number {
                     //Gives different data on subsequent reads of the same fd
                     //which is not great. The newline can be lost for example.
                     let uptime = Instant::now().duration_since(self.startup_time);
-                    let content = format!("{}\n", uptime.as_secs_f32());
+                    let content = format!("Uptime: {:.2}\nProcesses: {}\n", 
+                        uptime.as_secs_f32(),
+                        self.num_processes);
                     let mut cursor = Cursor::new(&content);
                     cursor.set_position(offset as u64);
                     let num_read = cursor.read(buf).expect("Failed to read from file");
@@ -375,18 +382,22 @@ impl Process {
         let path = self._resolve_path(path, &sys);
         let file_entry = sys.inode_mut_from_path(&path)?;
         let permissions = file_entry.permissions;
-        if let File::Regular(f) = &file_entry.file {
-            Ok(FileStat {
+        match &file_entry.file {
+            File::Regular(regular_file) => Ok(FileStat {
                 file_type: FileType::Regular,
-                size: Some(f.content.len()),
+                size: Some(regular_file.content.len()),
                 permissions,
-            })
-        } else {
-            Ok(FileStat {
+            }),
+            File::Dir(_) => Ok(FileStat {
                 file_type: FileType::Directory,
                 size: None,
                 permissions,
-            })
+            }),
+            File::Virtual => Ok(FileStat {
+                file_type: FileType::Regular,
+                size: Some(0),
+                permissions,
+            }),
         }
     }
 
