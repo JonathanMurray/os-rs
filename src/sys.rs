@@ -12,6 +12,7 @@ pub struct System {
     startup_time: Instant,
     pids: Vec<u32>,
     next_pid: u32,
+    processes: Vec<Arc<Mutex<_Process>>>,
 }
 
 #[derive(Debug)]
@@ -36,7 +37,10 @@ pub struct FileStat {
 }
 
 #[derive(Debug)]
-pub struct Process {
+pub struct Process(Arc<Mutex<_Process>>);
+
+#[derive(Debug)]
+struct _Process {
     pid: u32,
     sys: Option<Arc<Mutex<System>>>,
     open_files: Vec<OpenFile>,
@@ -126,6 +130,7 @@ impl System {
             startup_time: Instant::now(),
             pids: vec![],
             next_pid: 0,
+            processes: vec![],
         }
     }
 
@@ -137,13 +142,21 @@ impl System {
             sys.next_pid += 1;
             pid
         };
-        Process {
+        let proc = _Process {
             pid,
             sys: Some(sys),
             open_files: Default::default(),
             next_fd: 0,
             cwd: ROOT_INODE_NUMBER,
+        };
+        let proc = Arc::new(Mutex::new(proc));
+        let cloned_proc = Arc::clone(&proc);
+        {
+            let proc = proc.lock().unwrap();
+            let mut sys = proc.sys.as_ref().unwrap().lock().unwrap();
+            sys.processes.push(cloned_proc);
         }
+        Process(proc)
     }
 
     fn read_at_offset(
@@ -172,7 +185,7 @@ impl System {
                     //which is not great. The newline can be lost for example.
                     let uptime = Instant::now().duration_since(self.startup_time);
                     let content = format!(
-                        "Uptime: {:.2}\nProcesses: {:?}\n",
+                        "Uptime: {:.2}\n_Processes: {:?}\n",
                         uptime.as_secs_f32(),
                         self.pids
                     );
@@ -222,6 +235,61 @@ impl System {
 }
 
 impl Process {
+    pub fn create<S: Into<String>>(
+        &mut self,
+        path: S,
+        file_type: FileType,
+        permissions: FilePermissions,
+    ) -> Result<()> {
+        self.0.lock().unwrap().create(path, file_type, permissions)
+    }
+
+    pub fn rename<S: Into<String>>(&mut self, old_path: &str, new_path: S) -> Result<()> {
+        self.0.lock().unwrap().rename(old_path, new_path)
+    }
+
+    pub fn remove(&mut self, path: &str) -> Result<()> {
+        self.0.lock().unwrap().remove(path)
+    }
+
+    pub fn open(&mut self, path: &str) -> Result<u32> {
+        self.0.lock().unwrap().open(path)
+    }
+
+    pub fn close(&mut self, fd: u32) -> Result<()> {
+        self.0.lock().unwrap().close(fd)
+    }
+
+    pub fn write(&mut self, fd: u32, buf: &[u8]) -> Result<()> {
+        self.0.lock().unwrap().write(fd, buf)
+    }
+
+    pub fn read(&mut self, fd: u32, buf: &mut [u8]) -> Result<usize> {
+        self.0.lock().unwrap().read(fd, buf)
+    }
+
+    pub fn seek(&mut self, fd: u32, offset: usize) -> Result<()> {
+        self.0.lock().unwrap().seek(fd, offset)
+    }
+
+    pub fn stat(&mut self, path: &str) -> Result<FileStat> {
+        self.0.lock().unwrap().stat(path)
+    }
+
+    pub fn list_dir<S: Into<String>>(&mut self, path: S) -> Result<Vec<String>> {
+        self.0.lock().unwrap().list_dir(path)
+    }
+
+    pub fn chdir<S: Into<String>>(&mut self, path: S) -> Result<()> {
+        self.0.lock().unwrap().chdir(path)
+    }
+
+    pub fn get_current_dir_name(&mut self) -> Path {
+        self.0.lock().unwrap().get_current_dir_name()
+    }
+}
+
+impl _Process {
     fn find_open_file_mut(&mut self, fd: u32) -> Result<&mut OpenFile> {
         self.open_files
             .iter_mut()
@@ -479,8 +547,9 @@ impl Process {
 
 impl Drop for Process {
     fn drop(&mut self) {
-        let mut sys = self.sys.as_ref().expect("some sys").lock().unwrap();
-        sys.pids.retain(|pid| pid != &self.pid);
+        let proc = self.0.lock().unwrap();
+        let mut sys = proc.sys.as_ref().expect("some sys").lock().unwrap();
+        sys.pids.retain(|pid| pid != &proc.pid);
     }
 }
 
