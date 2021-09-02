@@ -7,14 +7,14 @@ type Result<T> = core::result::Result<T, String>;
 #[derive(Debug)]
 pub struct System {
     inodes: Vec<Inode>,
-    next_inode_number: usize,
-    uptime_virtual_inode_number: usize,
+    next_inode_number: u32,
+    uptime_virtual_inode_number: u32,
     startup_time: Instant,
 }
 
 #[derive(Debug)]
 struct Inode {
-    inode_number: usize,
+    inode_number: u32,
     path: Path,
     file: File,
     permissions: FilePermissions,
@@ -37,14 +37,14 @@ pub struct FileStat {
 pub struct Process {
     sys: Option<Arc<Mutex<System>>>,
     open_files: Vec<OpenFile>,
-    next_fd: usize,
-    cwd: usize,
+    next_fd: u32,
+    cwd: u32,
 }
 
 #[derive(Debug, Copy, Clone)]
 struct OpenFile {
-    inode_number: usize,
-    fd: usize,
+    inode_number: u32,
+    fd: u32,
     offset: usize,
 }
 
@@ -80,7 +80,7 @@ impl Path {
     }
 }
 
-const ROOT_INODE_NUMBER: usize = 0;
+const ROOT_INODE_NUMBER: u32 = 0;
 
 impl System {
     pub fn new() -> Self {
@@ -135,7 +135,7 @@ impl System {
 
     fn read_at_offset(
         &mut self,
-        inode_number: usize,
+        inode_number: u32,
         offset: usize,
         buf: &mut [u8],
     ) -> Result<usize> {
@@ -196,7 +196,7 @@ impl System {
             .ok_or_else(|| format!("No inode with path: '{:?}'", path))
     }
 
-    fn inode_from_number(&self, inode_number: usize) -> Result<&Inode> {
+    fn inode_from_number(&self, inode_number: u32) -> Result<&Inode> {
         self.inodes
             .iter()
             .find(|f| f.inode_number == inode_number)
@@ -205,14 +205,14 @@ impl System {
 }
 
 impl Process {
-    fn find_open_file_mut(&mut self, fd: usize) -> Result<&mut OpenFile> {
+    fn find_open_file_mut(&mut self, fd: u32) -> Result<&mut OpenFile> {
         self.open_files
             .iter_mut()
             .find(|f| f.fd == fd)
             .ok_or_else(|| format!("No such fd: {}", fd))
     }
 
-    fn find_open_file(&self, fd: usize) -> Result<&OpenFile> {
+    fn find_open_file(&self, fd: u32) -> Result<&OpenFile> {
         self.open_files
             .iter()
             .find(|f| f.fd == fd)
@@ -280,7 +280,7 @@ impl Process {
         Ok(())
     }
 
-    pub fn open(&mut self, path: &str) -> Result<usize> {
+    pub fn open(&mut self, path: &str) -> Result<u32> {
         let mut sys = self.sys.as_ref().expect("some sys").lock().unwrap();
         sys.log(&format!("open({})", path));
         let path = self._resolve_path(path, &sys);
@@ -295,14 +295,14 @@ impl Process {
         Ok(fd)
     }
 
-    pub fn close(&mut self, fd: usize) -> Result<()> {
+    pub fn close(&mut self, fd: u32) -> Result<()> {
         let mut sys = self.sys.as_ref().expect("some sys").lock().unwrap();
         sys.log(&format!("close({})", fd));
         self.open_files.retain(|f| f.fd != fd);
         Ok(())
     }
 
-    pub fn write(&mut self, fd: usize, buf: &[u8]) -> Result<()> {
+    pub fn write(&mut self, fd: u32, buf: &[u8]) -> Result<()> {
         //TODO permissions
         let arc_sys = self.sys.take().expect("sys");
         arc_sys.lock().unwrap().log(&format!("write({}, ...)", fd));
@@ -331,7 +331,7 @@ impl Process {
         Ok(())
     }
 
-    pub fn read(&mut self, fd: usize, buf: &mut [u8]) -> Result<usize> {
+    pub fn read(&mut self, fd: u32, buf: &mut [u8]) -> Result<usize> {
         let arc_sys = self.sys.take().expect("some sys");
         let result = {
             let mut sys = arc_sys.lock().unwrap();
@@ -357,7 +357,7 @@ impl Process {
         result
     }
 
-    pub fn seek(&mut self, fd: usize, offset: usize) -> Result<()> {
+    pub fn seek(&mut self, fd: u32, offset: usize) -> Result<()> {
         let arc_sys = self.sys.take().expect("some sys");
         arc_sys
             .lock()
@@ -497,7 +497,7 @@ struct RegularFile {
 
 #[derive(Debug)]
 struct Directory {
-    children: Vec<usize>,
+    children: Vec<u32>,
 }
 
 #[cfg(test)]
