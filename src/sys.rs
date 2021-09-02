@@ -1,5 +1,6 @@
 use std::io::{Cursor, Read};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 type Result<T> = core::result::Result<T, String>;
 
@@ -7,6 +8,8 @@ type Result<T> = core::result::Result<T, String>;
 pub struct System {
     inodes: Vec<Inode>,
     next_inode_number: usize,
+    uptime_virtual_inode_number: usize,
+    startup_time: Instant,
 }
 
 #[derive(Debug)]
@@ -77,6 +80,8 @@ impl Path {
     }
 }
 
+const ROOT_INODE_NUMBER: usize = 0;
+
 impl System {
     pub fn new() -> Self {
         let mut root_dir = Inode {
@@ -91,22 +96,78 @@ impl System {
             file: File::new_regular(),
             permissions: FilePermissions::ReadOnly,
         };
+        let mut proc_dir = Inode {
+            inode_number: 2,
+            path: Path("/proc".to_owned()),
+            file: File::new_dir(),
+            permissions: FilePermissions::ReadOnly,
+        };
+        let uptime_file = Inode {
+            inode_number: 3,
+            path: Path("/proc/uptime".to_owned()),
+            file: File::Virtual,
+            permissions: FilePermissions::ReadOnly,
+        };
+
         if let File::Dir(dir) = &mut root_dir.file {
-            dir.children.push(1);
+            dir.children.push(syslog_file.inode_number);
+            dir.children.push(proc_dir.inode_number);
+        }
+        if let File::Dir(dir) = &mut proc_dir.file {
+            dir.children.push(uptime_file.inode_number);
         }
         Self {
-            inodes: vec![root_dir, syslog_file],
-            next_inode_number: 2,
+            inodes: vec![root_dir, syslog_file, proc_dir, uptime_file],
+            next_inode_number: 4,
+            uptime_virtual_inode_number: 3,
+            startup_time: Instant::now(),
         }
     }
 
     pub fn spawn_process(sys: Arc<Mutex<Self>>) -> Process {
-        let root_inode_number = 0;
         Process {
             sys: Some(sys),
             open_files: Default::default(),
             next_fd: 0,
-            cwd: root_inode_number,
+            cwd: ROOT_INODE_NUMBER,
+        }
+    }
+
+    fn read_at_offset(
+        &mut self,
+        inode_number: usize,
+        offset: usize,
+        buf: &mut [u8],
+    ) -> Result<usize> {
+        let file = &self
+            .inodes
+            .iter()
+            .find(|f| f.inode_number == inode_number)
+            .ok_or_else(|| "fd pointing to non-existent file".to_owned())?
+            .file;
+
+        match file {
+            File::Regular(regular_file) => {
+                let mut cursor = Cursor::new(&regular_file.content);
+                cursor.set_position(offset as u64);
+                let num_read = cursor.read(buf).expect("Failed to read from file");
+                Ok(num_read)
+            }
+            File::Virtual => {
+                if inode_number == self.uptime_virtual_inode_number {
+                    //Gives different data on subsequent reads of the same fd
+                    //which is not great. The newline can be lost for example.
+                    let uptime = Instant::now().duration_since(self.startup_time);
+                    let content = format!("{}\n", uptime.as_secs_f32());
+                    let mut cursor = Cursor::new(&content);
+                    cursor.set_position(offset as u64);
+                    let num_read = cursor.read(buf).expect("Failed to read from file");
+                    Ok(num_read)
+                } else {
+                    panic!("No virtual file for inode number {}", inode_number)
+                }
+            }
+            File::Dir(_) => Err("Can't read directory".to_owned()),
         }
     }
 
@@ -124,7 +185,7 @@ impl System {
         let parent = &mut self.inode_mut_from_path(&parent_path)?.file;
         match parent {
             File::Dir(ref mut dir) => Ok(dir),
-            File::Regular(_) => panic!("Parent {:?} is not a directory", parent_path),
+            _ => panic!("Parent {:?} is not a directory", parent_path),
         }
     }
 
@@ -279,27 +340,18 @@ impl Process {
                 .expect("No syslog file")
                 .inode_number;
             let open_file = self.find_open_file_mut(fd)?;
-            let f = &sys
-                .inodes
-                .iter()
-                .find(|f| f.inode_number == open_file.inode_number)
-                .ok_or_else(|| "fd pointing to non-existent file".to_owned())?
-                .file;
 
-            let result = if let File::Regular(f) = f {
-                let mut cursor = Cursor::new(&f.content);
-                cursor.set_position(open_file.offset as u64);
-                let num_read = cursor.read(buf).expect("Failed to read from file");
-                open_file.offset += num_read;
-                Ok(num_read)
-            } else {
-                Err("Can't read directory".to_owned())
-            };
-            if open_file.inode_number != syslog_inode_number {
-                //Don't log syslog reads, as that may cause an infinite read
-                sys.log(&format!("read({}, ...)", fd));
+            match sys.read_at_offset(open_file.inode_number, open_file.offset, buf) {
+                Ok(num_read) => {
+                    open_file.offset += num_read;
+                    if open_file.inode_number != syslog_inode_number {
+                        //Don't log syslog reads, as that may cause an infinite read
+                        sys.log(&format!("read({}, ...)", fd));
+                    }
+                    Ok(num_read)
+                }
+                err => err,
             }
-            result
         };
         self.sys = Some(arc_sys);
         result
@@ -414,6 +466,7 @@ pub enum FileType {
 enum File {
     Regular(RegularFile),
     Dir(Directory),
+    Virtual,
 }
 
 impl File {
@@ -466,15 +519,11 @@ mod tests {
         let mut proc = System::spawn_process(Arc::new(Mutex::new(sys)));
         proc.create("/myfile", FileType::Regular, FilePermissions::ReadWrite)
             .unwrap();
-        assert_eq!(proc.list_dir("/").unwrap(), vec!["/syslog", "/myfile"]);
+        assert!(proc.list_dir("/").unwrap().contains(&"/myfile".to_owned()));
         proc.create("/dir", FileType::Directory, FilePermissions::ReadWrite)
             .unwrap();
-        assert_eq!(
-            proc.list_dir("/").unwrap(),
-            vec!["/syslog", "/myfile", "/dir"]
-        );
         proc.rename("/myfile", "/dir/moved").unwrap();
-        assert_eq!(proc.list_dir("/").unwrap(), vec!["/syslog", "/dir"]);
+        assert!(!proc.list_dir("/").unwrap().contains(&"/myfile".to_owned()));
         assert_eq!(proc.list_dir("/dir").unwrap(), vec!["/dir/moved"]);
     }
 
@@ -485,9 +534,12 @@ mod tests {
         let mut proc = System::spawn_process(Arc::new(Mutex::new(sys)));
         proc.create("/myfile", FileType::Regular, FilePermissions::ReadWrite)
             .unwrap();
-        assert_eq!(proc.list_dir("/").unwrap(), vec!["/syslog", "/myfile"]);
+        assert!(proc.list_dir("/").unwrap().contains(&"/myfile".to_owned()));
         proc.rename("myfile", "new_name").unwrap();
-        assert_eq!(proc.list_dir("/").unwrap(), vec!["/syslog", "/new_name"]);
+        assert!(proc
+            .list_dir("/")
+            .unwrap()
+            .contains(&"/new_name".to_owned()));
     }
 
     #[test]

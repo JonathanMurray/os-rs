@@ -101,12 +101,19 @@ fn cat(args: &[&str], sys: &mut Process) {
             Ok(fd) => {
                 loop {
                     let mut buf = vec![0, 0, 0];
-                    let n = sys.read(fd, &mut buf).unwrap();
-                    if n > 0 {
-                        let s = String::from_utf8_lossy(&buf);
-                        print!("{}", s);
-                    } else {
-                        break;
+                    match sys.read(fd, &mut buf) {
+                        Ok(n) => {
+                            if n > 0 {
+                                let s = String::from_utf8_lossy(&buf);
+                                print!("{}", s);
+                            } else {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            println!("Error: {}", e);
+                            break;
+                        }
                     }
                 }
                 sys.close(fd).unwrap();
