@@ -19,7 +19,7 @@ pub async fn main() {
 }
 
 fn run_background_proc(sys: Arc<Mutex<System>>) {
-    let mut proc = System::spawn_process(sys);
+    let mut proc = System::spawn_process(sys, "background".to_owned());
     proc.create("/uptime", FileType::Regular, FilePermissions::ReadWrite)
         .expect("Create uptime file");
     let fd = proc.open("/uptime").expect("Open uptime file");
@@ -40,7 +40,7 @@ fn run_shell(sys: Arc<Mutex<System>>) {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 
-    let mut proc = System::spawn_process(sys);
+    let mut proc = System::spawn_process(sys, "shell".to_owned());
 
     loop {
         print!("{}$ ", proc.get_current_dir_name().as_str());

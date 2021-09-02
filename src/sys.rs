@@ -1,4 +1,5 @@
 use std::io::{Cursor, Read};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -10,9 +11,8 @@ pub struct System {
     next_inode_number: u32,
     status_virtual_inode_number: u32,
     startup_time: Instant,
-    pids: Vec<u32>,
     next_pid: u32,
-    processes: Vec<Arc<Mutex<_Process>>>,
+    processes: HashMap<u32, Arc<Mutex<_Process>>>,
 }
 
 #[derive(Debug)]
@@ -42,6 +42,7 @@ pub struct Process(Arc<Mutex<_Process>>);
 #[derive(Debug)]
 struct _Process {
     pid: u32,
+    name: String,
     sys: Option<Arc<Mutex<System>>>,
     open_files: Vec<OpenFile>,
     next_fd: u32,
@@ -128,22 +129,21 @@ impl System {
             next_inode_number: 4,
             status_virtual_inode_number: 3,
             startup_time: Instant::now(),
-            pids: vec![],
             next_pid: 0,
-            processes: vec![],
+            processes: Default::default(),
         }
     }
 
-    pub fn spawn_process(sys: Arc<Mutex<Self>>) -> Process {
+    pub fn spawn_process(sys: Arc<Mutex<Self>>, process_name: String) -> Process {
         let pid = {
             let mut sys = sys.lock().expect("lock sys when spawning process");
             let pid = sys.next_pid;
-            sys.pids.push(pid);
             sys.next_pid += 1;
             pid
         };
         let proc = _Process {
             pid,
+            name: process_name, 
             sys: Some(sys),
             open_files: Default::default(),
             next_fd: 0,
@@ -154,7 +154,7 @@ impl System {
         {
             let proc = proc.lock().unwrap();
             let mut sys = proc.sys.as_ref().unwrap().lock().unwrap();
-            sys.processes.push(cloned_proc);
+            sys.processes.insert(pid, cloned_proc);
         }
         Process(proc)
     }
@@ -187,7 +187,7 @@ impl System {
                     let content = format!(
                         "Uptime: {:.2}\n_Processes: {:?}\n",
                         uptime.as_secs_f32(),
-                        self.pids
+                        self.processes
                     );
                     let mut cursor = Cursor::new(&content);
                     cursor.set_position(offset as u64);
@@ -549,7 +549,7 @@ impl Drop for Process {
     fn drop(&mut self) {
         let proc = self.0.lock().unwrap();
         let mut sys = proc.sys.as_ref().expect("some sys").lock().unwrap();
-        sys.pids.retain(|pid| pid != &proc.pid);
+        sys.processes.remove(&proc.pid);
     }
 }
 
