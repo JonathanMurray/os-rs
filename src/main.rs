@@ -1,3 +1,4 @@
+mod procfs;
 mod sys;
 
 use std::io::{self, Write};
@@ -24,7 +25,7 @@ fn run_background_proc(sys: Arc<Mutex<System>>) {
         .expect("Create uptime file");
     let fd = proc.open("/uptime").expect("Open uptime file");
     let mut secs = 0_u64;
-    for _ in 0..5 {
+    for _ in 0..50 {
         std::thread::sleep(Duration::from_secs(1));
         secs += 1;
         proc.seek(fd, 0).expect("Seek in uptime file");
@@ -80,13 +81,17 @@ fn stat(args: &[&str], sys: &mut Process) {
                 match stat.file_type {
                     FileType::Regular => {
                         file_type = "file";
-                        size = format!(" {} bytes", stat.size.unwrap());
+                        size = format!(" {} bytes", stat.size);
                     }
                     FileType::Directory => {
                         file_type = "directory";
                     }
                 }
-                println!("{} {}{}", file_type, permissions, size);
+
+                println!(
+                    "{} {}{} ({}/{})",
+                    file_type, permissions, size, stat.filesystem, stat.inode_number
+                );
             }
             Err(e) => println!("Error: {}", e),
         }
@@ -99,12 +104,12 @@ fn cat(args: &[&str], sys: &mut Process) {
     if let Some(&path) = args.get(1) {
         match sys.open(path) {
             Ok(fd) => {
+                let mut buf = vec![0; 1024];
                 loop {
-                    let mut buf = vec![0, 0, 0];
                     match sys.read(fd, &mut buf) {
                         Ok(n) => {
                             if n > 0 {
-                                let s = String::from_utf8_lossy(&buf);
+                                let s = String::from_utf8_lossy(&buf[..n]);
                                 print!("{}", s);
                             } else {
                                 break;
