@@ -1,9 +1,14 @@
+use std::ops::Deref;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Path(String);
 
 // A canonical absolute path
 impl Path {
+    pub fn new(path: String) -> Self {
+        Self(path)
+    }
+
     pub fn resolve(mut self, relative_path: &str) -> Self {
         if relative_path == "." {
             return self;
@@ -31,6 +36,19 @@ impl Path {
     }
 }
 
+impl Deref for Path {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<Path> for String {
+    fn from(path: Path) -> Self {
+        path.0
+    }
+}
 
 #[derive(PartialEq, Debug)]
 pub enum FileType {
@@ -38,13 +56,8 @@ pub enum FileType {
     Directory,
 }
 
-
 #[derive(PartialEq, Debug, Copy, Clone)]
 pub enum FilePermissions {
     ReadWrite,
     ReadOnly,
 }
-
-#[derive(Debug)]
-// Processes can be accessed from different threads.
-struct Processes(HashMap<u32, Arc<Mutex<_Process>>>);
