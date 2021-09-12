@@ -62,22 +62,6 @@ pub struct System {
     vfs: VirtualFilesystemSwitch,
 }
 
-#[derive(Debug)]
-pub struct Inode {
-    pub parent_id: InodeIdentifier,
-    pub id: InodeIdentifier,
-    //TODO: Maybe Inode shouldn't contain "File" in its current state. It must be possible to create an Inode
-    //without having everything that makes up a "File" (all the content). At least procfs wants to.
-    pub file: File,
-    pub permissions: FilePermissions,
-}
-
-#[derive(PartialEq, Debug, Copy, Clone)]
-pub struct InodeIdentifier {
-    pub filesystem_id: FilesystemId,
-    pub number: Ino,
-}
-
 #[derive(PartialEq, Debug)]
 pub struct FileStat {
     pub file_type: FileType,
@@ -113,7 +97,7 @@ pub struct OpenFile {
 
 #[derive(Debug)]
 struct VirtualFilesystemSwitch {
-    regularfs: RegularFilesystem,
+    fs: RegularFilesystem,
     procfs: ProcFilesystem,
 }
 
@@ -126,33 +110,28 @@ impl VirtualFilesystemSwitch {
         let root_inode = Inode {
             parent_id: root_inode_id, //root has self as parent
             id: root_inode_id,
-            file: File::new_dir(),
+            file_type: FileType::Directory,
+            size: 0,
             permissions: FilePermissions::ReadOnly,
         };
-        let regularfs = RegularFilesystem::new(root_inode);
+        let fs = RegularFilesystem::new(root_inode);
         let procfs = ProcFilesystem::new(root_inode_id);
-        Self { regularfs, procfs }
+        Self { fs, procfs }
     }
 
     pub fn mount_proc(&mut self) {
         // TODO: Support general mounting, not just for proc on /proc.
-        let root_inode = self
-            .inode_mut(InodeIdentifier {
-                filesystem_id: FilesystemId::Main,
-                number: 0,
-            })
-            .expect("Root inode must exist when we mount proc");
-        if let File::Dir(ref mut root_dir) = &mut root_inode.file {
-            root_dir.children.insert(
+
+        self.fs
+            .add_child_to_directory(
+                0,
                 "proc".to_owned(),
                 InodeIdentifier {
                     filesystem_id: FilesystemId::Proc,
                     number: 0,
                 },
-            );
-        } else {
-            panic!("Root inode must point to a directory");
-        }
+            )
+            .expect("Add proc to root dir");
     }
 
     pub fn create_file<S: Into<String>>(
@@ -168,10 +147,9 @@ impl VirtualFilesystemSwitch {
         let parent_inode = self.resolve_from_parts(&parts[..parts.len() - 1], cwd)?;
         let parent_id = parent_inode.id;
 
-        match &parent_inode.file {
-            File::Dir(_) => {}
-            _ => return Err("Parent is not a directory".to_owned()),
-        };
+        if !parent_inode.is_dir() {
+            return Err("Parent is not a directory".to_owned());
+        }
 
         let name = parts[parts.len() - 1].to_owned();
 
@@ -189,28 +167,21 @@ impl VirtualFilesystemSwitch {
         // file can be on different filesystem than its parent, for example /proc
         let filesystem_id = filesystem_id.unwrap_or(parent_inode_id.filesystem_id);
 
-        let new_ino = if filesystem_id == FilesystemId::Main {
-            self.regularfs
-                .create_inode(file_type, permissions, parent_inode_id)
+        if filesystem_id == FilesystemId::Main {
+            let new_ino = self
+                .fs
+                .create_inode(file_type, permissions, parent_inode_id);
+            self.fs.add_child_to_directory(
+                parent_inode_id.number,
+                name,
+                InodeIdentifier {
+                    filesystem_id,
+                    number: new_ino,
+                },
+            )?;
         } else {
             return Err("Can't create inode on procfs".to_owned());
         };
-
-        let parent_inode = self
-            .inode_mut(parent_inode_id)
-            .expect("Parent directory disappeared");
-        let parent_dir = match &mut parent_inode.file {
-            File::Dir(dir) => dir,
-            _ => return Err("Parent is not a directory".to_owned()),
-        };
-
-        parent_dir.children.insert(
-            name,
-            InodeIdentifier {
-                filesystem_id,
-                number: new_ino,
-            },
-        );
 
         Ok(())
     }
@@ -220,28 +191,21 @@ impl VirtualFilesystemSwitch {
         let inode = self.resolve_from_parts(&parts, cwd)?;
         let inode_id = inode.id;
 
-        let inode = self.inode_mut(inode_id)?;
+        let inode = self.inode(inode_id)?;
 
-        if let File::Dir(_) = &inode.file {
+        if inode.file_type == FileType::Directory {
             return Err("Cannot remove directory".to_owned());
         }
         let parent_id = inode.parent_id;
-        let parent_inode = self.inode_mut(parent_id)?;
-        let parent_dir = match &mut parent_inode.file {
-            File::Dir(dir) => dir,
-            _ => panic!("parent is not a directory"),
-        };
-
-        parent_dir
-            .children
-            .retain(|_name, child_id| *child_id != inode_id);
 
         match inode_id.filesystem_id {
-            FilesystemId::Main => self.regularfs.remove_inode(inode_id),
-            FilesystemId::Proc => return Err("Can't remove file from procfs".to_owned()),
+            FilesystemId::Main => {
+                self.fs.remove_inode(inode_id);
+                self.fs
+                    .remove_child_from_directory(parent_id.number, inode_id)
+            }
+            FilesystemId::Proc => Err("Can't remove file from procfs".to_owned()),
         }
-
-        Ok(())
     }
 
     pub fn rename_file<S: Into<String>>(
@@ -258,7 +222,7 @@ impl VirtualFilesystemSwitch {
         let inode_id = inode.id;
         let old_parent_id = inode.parent_id;
 
-        if let File::Dir(_) = &inode.file {
+        if inode.file_type == FileType::Directory {
             return Err("Cannot move directory".to_owned());
         }
 
@@ -271,39 +235,22 @@ impl VirtualFilesystemSwitch {
         }
         let new_parent_id = new_parent_inode.id;
 
-        match &new_parent_inode.file {
-            File::Dir(_) => {}
-            _ => return Err("New parent is not a directory".to_owned()),
+        if new_parent_inode.file_type != FileType::Directory {
+            return Err("New parent is not a directory".to_owned());
         }
 
         let old_parent_inode = self.inode(old_parent_id)?;
-        match &old_parent_inode.file {
-            File::Dir(_) => {}
-            _ => panic!("Old parent must be directory"),
-        };
+        if old_parent_inode.id.filesystem_id == FilesystemId::Proc {
+            return Err("Cannot move file in procfs".to_owned());
+        }
+        assert!(old_parent_inode.is_dir());
 
-        let inode = self.inode_mut(inode_id).expect("Inode must exist");
-        inode.parent_id = new_parent_id;
-
-        let old_parent_inode = self.inode_mut(old_parent_id)?;
-        let old_parent_dir = match &mut old_parent_inode.file {
-            File::Dir(dir) => dir,
-            _ => panic!("Old parent must be directory"),
-        };
-
-        old_parent_dir
-            .children
-            .retain(|_name, child_id| *child_id != inode_id);
-
-        let new_parent_inode = self.inode_mut(new_parent_id)?;
-        let new_parent_dir = match &mut new_parent_inode.file {
-            File::Dir(dir) => dir,
-            _ => return Err("New parent is not a directory".to_owned()),
-        };
-
-        new_parent_dir.children.insert(new_base_name, inode_id);
-
-        Ok(())
+        //TODO Maybe this should be: fs.rename(old_parent_id, inode_id, new_parent_id, new_name)
+        self.fs.set_inode_parent(inode_id.number, new_parent_id)?;
+        self.fs
+            .remove_child_from_directory(old_parent_id.number, inode_id)?;
+        self.fs
+            .add_child_to_directory(new_parent_id.number, new_base_name, inode_id)
     }
 
     pub fn stat_file(&mut self, path: &str, cwd: InodeIdentifier) -> Result<FileStat> {
@@ -314,22 +261,13 @@ impl VirtualFilesystemSwitch {
         let inode_number = inode.id.number;
         let filesystem = format!("{:?}", inode.id.filesystem_id);
 
-        match &inode.file {
-            File::Regular(regular_file) => Ok(FileStat {
-                file_type: FileType::Regular,
-                size: regular_file.content.len(),
-                permissions,
-                inode_number,
-                filesystem,
-            }),
-            File::Dir(_) => Ok(FileStat {
-                file_type: FileType::Directory,
-                size: 0,
-                permissions,
-                inode_number,
-                filesystem,
-            }),
-        }
+        Ok(FileStat {
+            file_type: inode.file_type,
+            size: inode.size,
+            permissions,
+            inode_number,
+            filesystem,
+        })
     }
 
     pub fn list_dir<S: Into<String>>(
@@ -340,10 +278,14 @@ impl VirtualFilesystemSwitch {
         let path = path.into();
         let parts: Vec<&str> = path.split('/').collect();
         let inode = self.resolve_from_parts(&parts, cwd)?;
+        if !inode.is_dir() {
+            return Err("Not a directory".to_owned());
+        }
+        let inode_id = inode.id;
 
-        match &inode.file {
-            File::Dir(dir) => Ok(dir.children.keys().map(|name| name.to_owned()).collect()),
-            File::Regular(_) => Err("Not a directory".to_owned()),
+        match inode_id.filesystem_id {
+            FilesystemId::Main => self.fs.list_directory(inode_id.number),
+            FilesystemId::Proc => self.procfs.list_directory(inode_id.number),
         }
     }
 
@@ -388,14 +330,8 @@ impl VirtualFilesystemSwitch {
         file_offset: usize,
     ) -> Result<usize> {
         match filesystem {
-            FilesystemId::Proc => {
-                self.procfs
-                    .read_file_at_offset(fd, inode_number, buf, file_offset)
-            }
-            FilesystemId::Main => {
-                self.regularfs
-                    .read_file_at_offset(inode_number, buf, file_offset)
-            }
+            FilesystemId::Proc => self.procfs.read_file_at_offset(fd, buf, file_offset),
+            FilesystemId::Main => self.fs.read_file_at_offset(inode_number, buf, file_offset),
         }
     }
 
@@ -409,8 +345,7 @@ impl VirtualFilesystemSwitch {
         if filesystem == FilesystemId::Proc {
             Err("Can't write to procfs".to_owned())
         } else {
-            self.regularfs
-                .write_file_at_offset(inode_number, buf, file_offset)
+            self.fs.write_file_at_offset(inode_number, buf, file_offset)
         }
     }
 
@@ -423,18 +358,16 @@ impl VirtualFilesystemSwitch {
                 // The root inode has itself as a parent
                 break;
             }
+
             let parent_inode = self.inode(inode.parent_id)?;
-            let parent_dir = match &parent_inode.file {
-                File::Dir(dir) => dir,
-                _ => panic!("Parent is not a directory: {:?}", parent_inode.id),
+            let name = match inode.parent_id.filesystem_id {
+                FilesystemId::Main => self
+                    .fs
+                    .directory_child_name(inode.parent_id.number, inode.id)?,
+                FilesystemId::Proc => todo!("procfs.directory_child_name()"),
             };
-            let name = parent_dir
-                .children
-                .iter()
-                .find(|(_name, inode_id)| **inode_id == inode.id)
-                .expect("Must be among children")
-                .0;
-            parts_reverse.push(name.clone());
+            parts_reverse.push(name);
+
             inode = parent_inode;
         }
 
@@ -447,19 +380,14 @@ impl VirtualFilesystemSwitch {
         Ok(path)
     }
 
-    fn resolve_from_parts(
-        &mut self,
-        mut parts: &[&str],
-        cwd: InodeIdentifier,
-    ) -> Result<&mut Inode> {
+    fn resolve_from_parts(&mut self, mut parts: &[&str], cwd: InodeIdentifier) -> Result<Inode> {
         let mut inode = match parts.get(0) {
             Some(&"") => {
                 // (empty string here means the path starts with '/', since we split on it)
                 // We got an absolute path. Start from root.
                 parts = &parts[1..];
                 // TODO: better way for getting the root inode
-                &self
-                    .regularfs
+                self.fs
                     .inode(0)
                     .expect("Must have root inode with number 0")
             }
@@ -468,10 +396,7 @@ impl VirtualFilesystemSwitch {
         };
 
         for part in parts {
-            let current_dir = match &inode.file {
-                File::Dir(dir) => dir,
-                _ => panic!("Trying to resolve from non directory"),
-            };
+            let inode_id = inode.id;
 
             let next_id = match *part {
                 "." => {
@@ -482,39 +407,32 @@ impl VirtualFilesystemSwitch {
                     // We choose to allow trailing slash to make things easy for now.
                     continue;
                 }
-                ".." => &inode.parent_id,
-                _ => current_dir
-                    .children
-                    .get(*part)
-                    .ok_or_else(|| format!("File does not exist: [{}]", part))?,
+                ".." => inode.parent_id,
+                _ => match inode.id.filesystem_id {
+                    FilesystemId::Main => self.fs.directory_child_id(inode_id.number, part)?,
+                    FilesystemId::Proc => self.procfs.directory_child_id(inode_id.number, part)?,
+                },
             };
 
-            inode = self.inode(*next_id)?;
+            inode = self.inode(next_id)?;
         }
 
         let inode_id = inode.id;
-        self.inode_mut(inode_id)
+        self.inode(inode_id)
     }
 
-    fn resolve_directory(&mut self, path: &str, cwd: InodeIdentifier) -> Result<&mut Inode> {
+    fn resolve_directory(&mut self, path: &str, cwd: InodeIdentifier) -> Result<Inode> {
         let parts: Vec<&str> = path.split('/').collect();
         let inode = self.resolve_from_parts(&parts, cwd)?;
-        if let File::Regular(_) = &inode.file {
+        if inode.file_type != FileType::Directory {
             return Err(format!("Not a directory: {}", path));
         }
         Ok(inode)
     }
 
-    fn inode_mut(&mut self, inode_id: InodeIdentifier) -> Result<&mut Inode> {
+    fn inode(&self, inode_id: InodeIdentifier) -> Result<Inode> {
         match inode_id.filesystem_id {
-            FilesystemId::Main => self.regularfs.inode_mut(inode_id.number),
-            FilesystemId::Proc => self.procfs.inode_mut(inode_id.number),
-        }
-    }
-
-    fn inode(&self, inode_id: InodeIdentifier) -> Result<&Inode> {
-        match inode_id.filesystem_id {
-            FilesystemId::Main => self.regularfs.inode(inode_id.number),
+            FilesystemId::Main => self.fs.inode(inode_id.number),
             FilesystemId::Proc => self.procfs.inode(inode_id.number),
         }
     }
@@ -666,7 +584,7 @@ impl Context {
         let (filesystem, inode_number, offset) = {
             let mut processes = PROCESSES.lock().unwrap();
             let proc = processes.current();
-            proc.log.push(format!("read({}, buf", fd));
+            proc.log.push(format!("read({}, buf)", fd));
             let of = proc.find_open_file_mut(fd)?;
             (of.filesystem, of.inode_number, of.offset)
         };
@@ -695,7 +613,7 @@ impl Context {
             let mut processes = PROCESSES.lock().unwrap();
             let proc = processes.current();
             proc.log
-                .push(format!("write({}, <{} bytes>", fd, buf.len()));
+                .push(format!("write({}, <{} bytes>)", fd, buf.len()));
 
             let of = proc.find_open_file_mut(fd)?;
             (of.filesystem, of.inode_number, of.offset)
@@ -718,7 +636,7 @@ impl Context {
         let _active_context = ActiveContext::new(self);
         let mut processes = PROCESSES.lock().unwrap();
         let proc = processes.current();
-        proc.log.push(format!("seek({}, {}", fd, offset));
+        proc.log.push(format!("seek({}, {})", fd, offset));
         let mut of = proc.find_open_file_mut(fd)?;
         of.offset = offset;
         Ok(())
@@ -799,6 +717,31 @@ impl Process {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+pub struct Inode {
+    pub parent_id: InodeIdentifier,
+    pub id: InodeIdentifier,
+    pub file_type: FileType,
+    pub size: usize,
+    pub permissions: FilePermissions,
+}
+
+impl Inode {
+    pub fn is_dir(&self) -> bool {
+        self.file_type == FileType::Directory
+    }
+
+    pub fn is_regular(&self) -> bool {
+        self.file_type == FileType::Regular
+    }
+}
+
+#[derive(PartialEq, Debug, Copy, Clone)]
+pub struct InodeIdentifier {
+    pub filesystem_id: FilesystemId,
+    pub number: Ino,
+}
+
 #[derive(Debug)]
 pub enum File {
     Regular(RegularFile),
@@ -831,9 +774,25 @@ pub struct RegularFile {
     pub content: Vec<u8>,
 }
 
+impl RegularFile {
+    pub fn new() -> Self {
+        Self {
+            content: Default::default(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Directory {
     pub children: HashMap<String, InodeIdentifier>,
+}
+
+impl Directory {
+    pub fn new() -> Self {
+        Self {
+            children: Default::default(),
+        }
+    }
 }
 
 #[cfg(test)]

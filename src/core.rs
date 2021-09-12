@@ -1,4 +1,3 @@
-
 /// inode number
 pub type Ino = u32;
 
@@ -8,7 +7,7 @@ pub type Fd = u32;
 /// process id
 pub type Pid = u32;
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone, Copy)]
 pub enum FileType {
     Regular,
     Directory,
