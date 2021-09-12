@@ -2,41 +2,67 @@ use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use std::time::Instant;
 
-use crate::core::{FilePermissions, FileType, Path};
-use crate::sys::{self, FileStat};
+use crate::core::{Fd, FilePermissions, Ino, Pid};
+use crate::sys::{self, Directory, File, FilesystemId, Inode, InodeIdentifier};
 
 type Result<T> = core::result::Result<T, String>;
 
 #[derive(Debug)]
 pub struct ProcFilesystem {
     startup_time: Instant,
-    file_contents: HashMap<(u32, u32), String>,
+    file_contents: HashMap<(Pid, Fd), String>,
+    proc_inode: Inode,
+    status_inode: Inode,
 }
 
 impl ProcFilesystem {
-    pub fn new() -> Self {
+    pub fn new(parent_inode_id: InodeIdentifier) -> Self {
+        let mut proc_children = HashMap::new();
+
+        let proc_inode_id = InodeIdentifier {
+            filesystem_id: FilesystemId::Proc,
+            number: 0,
+        };
+        let status_inode_id = InodeIdentifier {
+            filesystem_id: FilesystemId::Proc,
+            number: 1,
+        };
+        proc_children.insert("status".to_owned(), status_inode_id);
         Self {
             startup_time: Instant::now(),
             file_contents: HashMap::new(),
+            proc_inode: Inode {
+                parent_id: parent_inode_id,
+                id: proc_inode_id,
+                file: File::Dir(Directory {
+                    children: proc_children,
+                }),
+                permissions: FilePermissions::ReadOnly,
+            },
+            status_inode: Inode {
+                parent_id: proc_inode_id,
+                id: status_inode_id,
+                file: File::new_regular(),
+                permissions: FilePermissions::ReadOnly,
+            },
         }
     }
 
-    pub fn open_file(&mut self, path: &Path, fd: u32) -> Result<u32> {
-        match path.as_str() {
-            s if s == "/proc/status" => {
+    pub fn open_file(&mut self, inode_number: Ino, fd: Fd) -> Result<()> {
+        match inode_number {
+            1 => {
                 let content = self._status_file_content();
                 let mut processes = sys::processes();
                 let pid = processes.current().pid;
                 self.file_contents.insert((pid, fd), content);
-                let inode = 0;
-                Ok(inode)
+                Ok(())
             }
-            s if s == "/proc" => Err("Cannot open. Is directory".to_owned()),
+            0 => Err("Cannot open. Is directory".to_owned()),
             _ => Err("Cannot open. No such file".to_owned()),
         }
     }
 
-    pub fn close_file(&mut self, fd: u32) -> Result<()> {
+    pub fn close_file(&mut self, fd: Fd) -> Result<()> {
         let mut processes = sys::processes();
         let proc = processes.current();
         self.file_contents
@@ -45,15 +71,40 @@ impl ProcFilesystem {
             .ok_or_else(|| "No such open file".to_owned())
     }
 
+    pub fn inode_mut(&mut self, inode_number: Ino) -> Result<&mut Inode> {
+        // TODO: It feels weird that we'd need to hand out a "File" object here
+        // We shouldn't be required to have the file contents prepared at this
+        // point?
+        match inode_number {
+            0 => Ok(&mut self.proc_inode),
+            1 => Ok(&mut self.status_inode),
+            _ => Err(format!(
+                "No file on procfs with inode number: {}",
+                inode_number
+            )),
+        }
+    }
+
+    pub fn inode(&self, inode_number: Ino) -> Result<&Inode> {
+        match inode_number {
+            0 => Ok(&self.proc_inode),
+            1 => Ok(&self.status_inode),
+            _ => Err(format!(
+                "No file on procfs with inode number: {}",
+                inode_number
+            )),
+        }
+    }
+
     pub fn read_file_at_offset(
         &mut self,
-        fd: u32,
-        inode_number: u32,
+        fd: Fd,
+        inode_number: Ino,
         buf: &mut [u8],
         file_offset: usize,
     ) -> Result<usize> {
         match inode_number {
-            0 => {
+            1 => {
                 let mut processes = sys::processes();
                 let current_proc = processes.current();
                 let content = self
@@ -86,33 +137,5 @@ impl ProcFilesystem {
             content.push_str(&format!("     log: {:?}\n", proc.log));
         }
         content
-    }
-
-    pub fn stat_file(&mut self, path: &Path) -> Result<FileStat> {
-        let filesystem = "procfs".to_owned();
-        match path.as_str() {
-            s if s == "/proc/status" => Ok(FileStat {
-                file_type: FileType::Regular,
-                size: 0,
-                permissions: FilePermissions::ReadOnly,
-                inode_number: 0,
-                filesystem,
-            }),
-            s if s == "/proc" => Ok(FileStat {
-                file_type: FileType::Directory,
-                size: 0,
-                permissions: FilePermissions::ReadOnly,
-                inode_number: 0, //TODO
-                filesystem,
-            }),
-            _ => Err("Cannot stat proc. No such file".to_owned()),
-        }
-    }
-
-    pub fn list_dir(&self, path: &Path) -> Result<Vec<String>> {
-        match path.as_str() {
-            s if s == "/proc" => Ok(vec!["/proc/status".to_owned()]),
-            _ => Err("Cannot list this proc file/dir".to_owned()),
-        }
     }
 }

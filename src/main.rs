@@ -1,5 +1,6 @@
 mod core;
 mod procfs;
+mod regularfs;
 mod sys;
 
 use std::io::{self, Write};
@@ -24,6 +25,7 @@ pub async fn main() {
 
 fn run_background_proc(sys: Arc<Mutex<System>>) {
     let mut sys = System::spawn_process(sys, "background".to_owned());
+
     let fd = {
         sys.sc_create("/uptime", FileType::Regular, FilePermissions::ReadWrite)
             .expect("Create uptime file");
@@ -53,7 +55,8 @@ fn run_shell(sys: Arc<Mutex<System>>) {
 
     loop {
         {
-            print!("{}$ ", sys.sc_get_current_dir_name().as_str());
+            let current_dir_name = sys.sc_get_current_dir_name().expect("Must have valid cwd");
+            print!("{}$ ", current_dir_name.as_str());
         }
         stdout.flush().unwrap();
         let mut input = String::new();
@@ -150,7 +153,7 @@ fn ls(args: &[&str], sys: &mut Context) {
                 println!("{}", path); //TODO
             } else {
                 match sys.sc_list_dir(path) {
-                    Ok(children) => println!("{}", children.join(" ")),
+                    Ok(children) => println!("{}", children.join("\t\t")),
                     Err(e) => println!("Error: {}", e),
                 };
             }
@@ -158,6 +161,7 @@ fn ls(args: &[&str], sys: &mut Context) {
         Err(e) => println!("Error: {}", e),
     }
 }
+
 fn touch(args: &[&str], sys: &mut Context) {
     if let Some(&path) = args.get(1) {
         match sys.sc_create(path, FileType::Regular, FilePermissions::ReadWrite) {
@@ -180,6 +184,17 @@ fn mkdir(args: &[&str], sys: &mut Context) {
     }
 }
 
+fn cd(args: &[&str], sys: &mut Context) {
+    let result = if let Some(&path) = args.get(1) {
+        sys.sc_chdir(path)
+    } else {
+        sys.sc_chdir("/")
+    };
+    if let Err(e) = result {
+        println!("Error: {}", e);
+    }
+}
+
 fn rm(args: &[&str], sys: &mut Context) {
     if let Some(&path) = args.get(1) {
         match sys.sc_remove(path) {
@@ -199,16 +214,5 @@ fn mv(args: &[&str], sys: &mut Context) {
         }
     } else {
         println!("Error: missing arg(s)");
-    }
-}
-
-fn cd(args: &[&str], sys: &mut Context) {
-    let result = if let Some(&path) = args.get(1) {
-        sys.sc_chdir(path)
-    } else {
-        sys.sc_chdir("/")
-    };
-    if let Err(e) = result {
-        println!("Error: {}", e);
     }
 }
