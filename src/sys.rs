@@ -114,24 +114,18 @@ impl VirtualFilesystemSwitch {
             size: 0,
             permissions: FilePermissions::ReadOnly,
         };
-        let fs = RegularFilesystem::new(root_inode);
+        let mut fs = RegularFilesystem::new(root_inode);
+        fs.add_child_to_directory(
+            0,
+            "proc".to_owned(),
+            InodeIdentifier {
+                filesystem_id: FilesystemId::Proc,
+                number: 0,
+            },
+        )
+        .expect("Add proc to root dir");
         let procfs = ProcFilesystem::new(root_inode_id);
         Self { fs, procfs }
-    }
-
-    pub fn mount_proc(&mut self) {
-        // TODO: Support general mounting, not just for proc on /proc.
-
-        self.fs
-            .add_child_to_directory(
-                0,
-                "proc".to_owned(),
-                InodeIdentifier {
-                    filesystem_id: FilesystemId::Proc,
-                    number: 0,
-                },
-            )
-            .expect("Add proc to root dir");
     }
 
     pub fn create_file<S: Into<String>>(
@@ -440,21 +434,9 @@ impl VirtualFilesystemSwitch {
 
 impl System {
     pub fn new() -> Self {
-        let mut vfs = VirtualFilesystemSwitch::new();
-        let cwd = InodeIdentifier {
-            filesystem_id: FilesystemId::Main,
-            number: 0,
-        };
-        vfs.create_file(
-            "syslog",
-            FileType::Regular,
-            FilePermissions::ReadOnly,
-            cwd,
-            None,
-        )
-        .expect("Creating /syslog");
-        vfs.mount_proc();
-        Self { vfs }
+        Self {
+            vfs: VirtualFilesystemSwitch::new(),
+        }
     }
 
     pub fn spawn_process(sys: Arc<Mutex<System>>, process_name: String) -> Context {
@@ -698,6 +680,13 @@ impl Context {
         };
 
         active_context.sys.vfs.rename_file(old_path, new_path, cwd)
+    }
+}
+
+impl Drop for Context {
+    fn drop(&mut self) {
+        let mut processes = PROCESSES.lock().unwrap();
+        processes.processes.remove(&self.pid);
     }
 }
 

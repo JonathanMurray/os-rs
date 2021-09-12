@@ -17,10 +17,12 @@ pub async fn main() {
 
     let sys = Arc::new(Mutex::new(sys));
     let sys2 = sys.clone();
-    let shell_task = tokio::task::spawn_blocking(move || run_shell(sys2));
-    let background_task = tokio::task::spawn_blocking(move || run_background_proc(sys));
+    let sys3 = sys.clone();
+    let shell_task = tokio::task::spawn_blocking(move || run_shell(sys));
+    let background_task = tokio::task::spawn_blocking(move || run_background_proc(sys2));
+    let idle_task = tokio::task::spawn_blocking(move || run_idle_proc(sys3));
 
-    futures::try_join!(shell_task, background_task).expect("Joining futures");
+    futures::try_join!(shell_task, background_task, idle_task).expect("Joining futures");
 }
 
 fn run_background_proc(sys: Arc<Mutex<System>>) {
@@ -44,6 +46,13 @@ fn run_background_proc(sys: Arc<Mutex<System>>) {
             )
             .expect("Write to uptime file");
         }
+    }
+}
+
+fn run_idle_proc(sys: Arc<Mutex<System>>) {
+    let _sys = System::spawn_process(sys, "idle".to_owned());
+    loop {
+        std::thread::sleep(Duration::from_secs(60));
     }
 }
 
