@@ -77,6 +77,7 @@ fn run_shell(sys: Arc<Mutex<System>>) {
                 Some(&"stat") => stat(&words, &mut sys),
                 Some(&"cat") => cat(&words, &mut sys),
                 Some(&"ls") => ls(&words, &mut sys),
+                Some(&"ll") => ll(&words, &mut sys),
                 Some(&"touch") => touch(&words, &mut sys),
                 Some(&"mkdir") => mkdir(&words, &mut sys),
                 Some(&"rm") => rm(&words, &mut sys),
@@ -93,36 +94,35 @@ fn stat(args: &[&str], sys: &mut Context) {
     if let Some(&path) = args.get(1) {
         match sys.sc_stat(path) {
             Ok(stat) => {
-                let file_type;
-                let permissions = format!(
-                    "r{}",
-                    if stat.permissions == FilePermissions::ReadWrite {
-                        "w"
-                    } else {
-                        "-"
-                    }
-                );
-                let mut size = "".to_owned();
-                match stat.file_type {
-                    FileType::Regular => {
-                        file_type = "file";
-                        size = format!(" {} bytes", stat.size);
-                    }
-                    FileType::Directory => {
-                        file_type = "directory";
-                    }
-                }
-
-                println!(
-                    "{} {}{} ({}/{})",
-                    file_type, permissions, size, stat.filesystem, stat.inode_number
-                );
+                println!("{}", _stat_line(stat));
             }
             Err(e) => println!("Error: {}", e),
         }
     } else {
         println!("Error: missing arg");
     }
+}
+
+fn _stat_line(stat: FileStat) -> String {
+    let file_type = match stat.file_type {
+        FileType::Regular => "file",
+        FileType::Directory => "directory",
+    }
+    .to_owned();
+    let permissions = match stat.permissions {
+        FilePermissions::ReadOnly => "r-",
+        FilePermissions::ReadWrite => "rw",
+    }
+    .to_owned();
+
+    let size = format!("{} bytes", stat.size);
+    format!(
+        "{:>10} {:>4} {:>10} {:<13}",
+        file_type,
+        permissions,
+        size,
+        format!("[{:?}:{}]", stat.filesystem, stat.inode_number)
+    )
 }
 
 fn cat(args: &[&str], sys: &mut Context) {
@@ -164,6 +164,29 @@ fn ls(args: &[&str], sys: &mut Context) {
             } else {
                 match sys.sc_list_dir(path) {
                     Ok(children) => println!("{}", children.join("\t\t")),
+                    Err(e) => println!("Error: {}", e),
+                };
+            }
+        }
+        Err(e) => println!("Error: {}", e),
+    }
+}
+
+fn ll(args: &[&str], sys: &mut Context) {
+    let path: &str = args.get(1).unwrap_or(&".");
+    match sys.sc_stat(path) {
+        Ok(stat) => {
+            if stat.file_type == FileType::Regular {
+                println!("{}{:>10}", _stat_line(stat), path);
+            } else {
+                match sys.sc_list_dir(path) {
+                    Ok(children) => {
+                        for child_name in children {
+                            let child_path = format!("{}/{}", path, child_name);
+                            let stat = sys.sc_stat(&child_path).unwrap();
+                            println!("{:<44}{}", _stat_line(stat), child_name);
+                        }
+                    }
                     Err(e) => println!("Error: {}", e),
                 };
             }
