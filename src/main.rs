@@ -2,6 +2,7 @@ mod core;
 mod procfs;
 mod regularfs;
 mod sys;
+mod vfs;
 
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};

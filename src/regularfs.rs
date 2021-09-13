@@ -2,9 +2,12 @@ use std::collections::HashMap;
 use std::io::{Cursor, Read};
 
 use crate::core::{FilePermissions, FileType, Ino};
-use crate::sys::{Directory, FilesystemId, Inode, InodeIdentifier, RegularFile};
+use crate::sys::{FilesystemId, Inode, InodeIdentifier};
 
 type Result<T> = core::result::Result<T, String>;
+
+type Directory = HashMap<String, InodeIdentifier>;
+type RegularFile = Vec<u8>;
 
 #[derive(Debug)]
 pub struct RegularFilesystem {
@@ -18,7 +21,7 @@ impl RegularFilesystem {
     pub fn new(root_inode: Inode) -> Self {
         let next_inode_number = root_inode.id.number + 1;
         let mut directories = HashMap::new();
-        directories.insert(root_inode.id.number, Directory::new());
+        directories.insert(root_inode.id.number, Default::default());
         let regular_files = HashMap::new();
         Self {
             inodes: vec![root_inode],
@@ -50,10 +53,10 @@ impl RegularFilesystem {
 
         match file_type {
             FileType::Regular => {
-                self.regular_files.insert(inode_number, RegularFile::new());
+                self.regular_files.insert(inode_number, Default::default());
             }
             FileType::Directory => {
-                self.directories.insert(inode_number, Directory::new());
+                self.directories.insert(inode_number, Default::default());
             }
         }
 
@@ -86,7 +89,7 @@ impl RegularFilesystem {
         child_inode_id: InodeIdentifier,
     ) -> Result<()> {
         let dir = self.directory_mut(dir_inode_number)?;
-        dir.children.insert(name, child_inode_id);
+        dir.insert(name, child_inode_id);
         Ok(())
     }
 
@@ -96,8 +99,7 @@ impl RegularFilesystem {
         child_inode_id: InodeIdentifier,
     ) -> Result<()> {
         let dir = self.directory_mut(dir_inode_number)?;
-        dir.children
-            .retain(|_name, child_id| *child_id != child_inode_id);
+        dir.retain(|_name, child_id| *child_id != child_inode_id);
         Ok(())
     }
 
@@ -112,7 +114,7 @@ impl RegularFilesystem {
 
     pub fn list_directory(&mut self, inode_number: Ino) -> Result<Vec<String>> {
         let dir = self.directory(inode_number)?;
-        Ok(dir.children.keys().map(|name| name.to_owned()).collect())
+        Ok(dir.keys().map(|name| name.to_owned()).collect())
     }
 
     pub fn directory_child_name(
@@ -122,7 +124,6 @@ impl RegularFilesystem {
     ) -> Result<String> {
         let dir = self.directory(dir_inode_number)?;
         match dir
-            .children
             .iter()
             .find(|(_name, child_id)| **child_id == child_inode_id)
         {
@@ -138,7 +139,6 @@ impl RegularFilesystem {
     ) -> Result<InodeIdentifier> {
         let dir = self.directory(dir_inode_number)?;
         let child_id = dir
-            .children
             .get(child_name)
             .ok_or_else(|| format!("No child with name: {}", child_name))?;
         Ok(*child_id)
@@ -152,7 +152,7 @@ impl RegularFilesystem {
     ) -> Result<usize> {
         match self.regular_files.get(&inode_number) {
             Some(regular_file) => {
-                let mut cursor = Cursor::new(&regular_file.content);
+                let mut cursor = Cursor::new(&regular_file);
                 cursor.set_position(file_offset as u64);
                 let num_read = cursor.read(buf).expect("Failed to read from file");
                 Ok(num_read)
@@ -173,16 +173,16 @@ impl RegularFilesystem {
             Some(f) => {
                 let mut num_written = 0;
                 for &b in buf {
-                    if file_offset < f.content.len() {
-                        f.content[file_offset] = b;
+                    if file_offset < f.len() {
+                        f[file_offset] = b;
                     } else {
-                        f.content.push(b);
+                        f.push(b);
                     }
                     file_offset += 1;
                     num_written += 1;
                 }
 
-                self.inode_mut(inode_number).expect("Inode must exist").size = f.content.len();
+                self.inode_mut(inode_number).expect("Inode must exist").size = f.len();
 
                 Ok(num_written)
             }
