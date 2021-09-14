@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::{Cursor, Read};
 
 use crate::core::{FilePermissions, FileType, Ino};
-use crate::sys::{FilesystemId, Inode, InodeIdentifier};
+use crate::sys::{DirectoryEntry, FilesystemId, Inode, InodeIdentifier};
 
 type Result<T> = core::result::Result<T, String>;
 
@@ -112,9 +112,19 @@ impl RegularFilesystem {
         Ok(())
     }
 
-    pub fn list_directory(&mut self, inode_number: Ino) -> Result<Vec<String>> {
+    pub fn list_directory(&mut self, inode_number: Ino) -> Result<Vec<DirectoryEntry>> {
         let dir = self.directory(inode_number)?;
-        Ok(dir.keys().map(|name| name.to_owned()).collect())
+        let listing = dir
+            .iter()
+            .map(|(name, id)| {
+                DirectoryEntry {
+                    inode_number: id.number,
+                    name: name.clone(),
+                    file_type: FileType::Regular, //TODO
+                }
+            })
+            .collect();
+        Ok(listing)
     }
 
     pub fn directory_child_name(

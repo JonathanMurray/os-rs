@@ -1,9 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Read};
 use std::time::Instant;
 
 use crate::core::{Fd, FilePermissions, FileType, Ino, Pid};
-use crate::sys::{self, FilesystemId, Inode, InodeIdentifier};
+use crate::sys::{self, DirectoryEntry, FilesystemId, Inode, InodeIdentifier};
 
 type Result<T> = core::result::Result<T, String>;
 
@@ -12,6 +12,7 @@ pub struct ProcFilesystem {
     parent_inode_id: InodeIdentifier,
     startup_time: Instant,
     file_contents: HashMap<(Pid, Fd), String>,
+    open_directories: HashSet<(Pid, Fd)>,
 }
 
 impl ProcFilesystem {
@@ -20,6 +21,7 @@ impl ProcFilesystem {
             parent_inode_id,
             startup_time: Instant::now(),
             file_contents: HashMap::new(),
+            open_directories: HashSet::new(),
         }
     }
 
@@ -43,7 +45,12 @@ impl ProcFilesystem {
                 self.file_contents.insert((current_pid, fd), content);
                 Ok(())
             }
-            0 => Err("Cannot open. Is directory".to_owned()),
+            0 => {
+                let processes = sys::processes();
+                let current_pid = processes.currently_running_pid.unwrap();
+                self.open_directories.insert((current_pid, fd));
+                Ok(())
+            }
             _ => {
                 if inode_number >= 1000 {
                     let mut processes = sys::processes();
@@ -75,10 +82,12 @@ impl ProcFilesystem {
     pub fn close_file(&mut self, fd: Fd) -> Result<()> {
         let mut processes = sys::processes();
         let proc = processes.current();
-        self.file_contents
-            .remove(&(proc.pid, fd))
-            .map(|_| ())
-            .ok_or_else(|| "No such open file".to_owned())
+        let closed_regular_file = self.file_contents.remove(&(proc.pid, fd)).is_some();
+        if !closed_regular_file && !self.open_directories.remove(&(proc.pid, fd)) {
+            return Err(format!("No file with fd: {}", fd));
+        }
+
+        Ok(())
     }
 
     pub fn inode(&self, inode_number: Ino) -> Result<Inode> {
@@ -136,18 +145,26 @@ impl ProcFilesystem {
         }
     }
 
-    pub fn list_directory(&mut self, inode_number: Ino) -> Result<Vec<String>> {
+    pub fn list_directory(&mut self, inode_number: Ino) -> Result<Vec<DirectoryEntry>> {
         match inode_number {
             0 => {
-                let mut children = vec!["status".to_owned()];
+                let mut listing = vec![DirectoryEntry {
+                    inode_number: 1,
+                    name: "status".to_owned(),
+                    file_type: FileType::Regular,
+                }];
                 let processes = sys::processes();
-                let pids: Vec<String> = processes
+                let pid_files: Vec<DirectoryEntry> = processes
                     .processes
                     .keys()
-                    .map(|pid| format!("{}", pid))
+                    .map(|pid| DirectoryEntry {
+                        inode_number: 1000 + pid,
+                        name: format!("{}", pid),
+                        file_type: FileType::Regular,
+                    })
                     .collect();
-                children.extend(pids);
-                Ok(children)
+                listing.extend(pid_files);
+                Ok(listing)
             }
             _ => Err(format!(
                 "No directory on procfs with inode number: {}",

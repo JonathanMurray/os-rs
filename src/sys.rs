@@ -61,8 +61,14 @@ pub struct FileStat {
     pub file_type: FileType,
     pub size: usize,
     pub permissions: FilePermissions,
+    pub inode_id: InodeIdentifier,
+}
+
+#[derive(PartialEq, Debug)]
+pub struct DirectoryEntry {
     pub inode_number: Ino,
-    pub filesystem: String,
+    pub name: String,
+    pub file_type: FileType,
 }
 
 #[derive(Debug)]
@@ -83,8 +89,7 @@ pub enum FilesystemId {
 
 #[derive(Debug, Copy, Clone)]
 pub struct OpenFile {
-    filesystem: FilesystemId,
-    inode_number: Ino,
+    inode_id: InodeIdentifier,
     fd: Fd,
     offset: usize,
 }
@@ -167,14 +172,13 @@ impl Context {
             (proc.cwd, proc.next_fd)
         };
 
-        let (filesystem, inode_number) = active_context.sys.vfs.open_file(path, cwd, fd)?;
+        let inode_id = active_context.sys.vfs.open_file(path, cwd, fd)?;
 
         let mut processes = PROCESSES.lock().unwrap();
         let proc = processes.current();
         proc.next_fd += 1;
         proc.open_files.push(OpenFile {
-            filesystem,
-            inode_number,
+            inode_id,
             fd,
             offset: 0,
         });
@@ -190,7 +194,10 @@ impl Context {
             proc.take_open_file(fd)?
         };
 
-        active_context.sys.vfs.close_file(open_file.filesystem, fd)
+        active_context
+            .sys
+            .vfs
+            .close_file(open_file.inode_id.filesystem_id, fd)
     }
 
     pub fn sc_stat(&mut self, path: &str) -> Result<FileStat> {
@@ -205,34 +212,33 @@ impl Context {
         active_context.sys.vfs.stat_file(path, cwd)
     }
 
-    pub fn sc_list_dir<S: Into<String>>(&mut self, path: S) -> Result<Vec<String>> {
+    pub fn sc_getdents(&mut self, fd: Fd) -> Result<Vec<DirectoryEntry>> {
         let mut active_context = ActiveContext::new(self);
-        let path = path.into();
-        let cwd = {
+        let inode_id = {
             let mut processes = PROCESSES.lock().unwrap();
             let proc = processes.current();
-            proc.log.push(format!("list_dir({:?})", path));
-            proc.cwd
+            proc.log.push(format!("getdents({})", fd));
+            let of = proc.find_open_file_mut(fd)?;
+            of.inode_id
         };
 
-        active_context.sys.vfs.list_dir(path, cwd)
+        active_context.sys.vfs.list_dir(inode_id)
     }
 
     pub fn sc_read(&mut self, fd: Fd, buf: &mut [u8]) -> Result<usize> {
         let mut active_context = ActiveContext::new(self);
-        let (filesystem, inode_number, offset) = {
+        let (inode_id, offset) = {
             let mut processes = PROCESSES.lock().unwrap();
             let proc = processes.current();
             proc.log.push(format!("read({}, buf)", fd));
             let of = proc.find_open_file_mut(fd)?;
-            (of.filesystem, of.inode_number, of.offset)
+            (of.inode_id, of.offset)
         };
 
-        let result =
-            active_context
-                .sys
-                .vfs
-                .read_file_at_offset(fd, filesystem, inode_number, buf, offset);
+        let result = active_context
+            .sys
+            .vfs
+            .read_file_at_offset(fd, inode_id, buf, offset);
 
         if let Ok(num_read) = result {
             let mut processes = PROCESSES.lock().unwrap();
@@ -248,21 +254,20 @@ impl Context {
         //TODO permissions
 
         let mut active_context = ActiveContext::new(self);
-        let (filesystem, inode_number, offset) = {
+        let (inode_id, offset) = {
             let mut processes = PROCESSES.lock().unwrap();
             let proc = processes.current();
             proc.log
                 .push(format!("write({}, <{} bytes>)", fd, buf.len()));
 
             let of = proc.find_open_file_mut(fd)?;
-            (of.filesystem, of.inode_number, of.offset)
+            (of.inode_id, of.offset)
         };
 
-        let num_written =
-            active_context
-                .sys
-                .vfs
-                .write_file_at_offset(filesystem, inode_number, buf, offset)?;
+        let num_written = active_context
+            .sys
+            .vfs
+            .write_file_at_offset(inode_id, buf, offset)?;
 
         let mut processes = PROCESSES.lock().unwrap();
         let proc = processes.current();
@@ -432,7 +437,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            ctx.sc_list_dir("/mydir/subdir").unwrap(),
+            list_dir(&mut ctx, "/mydir/subdir"),
             vec!["file_in_subdir".to_owned()]
         );
     }
@@ -485,6 +490,22 @@ mod tests {
         assert_eq!(n, 0);
     }
 
+    fn list_dir(ctx: &mut Context, path: &str) -> Vec<String> {
+        let fd = ctx.sc_open(path).unwrap();
+        let dents = ctx.sc_getdents(fd).unwrap();
+        ctx.sc_close(fd).unwrap();
+        dents.into_iter().map(|e| e.name).collect()
+    }
+
+    fn assert_dir_contains(ctx: &mut Context, dir_path: &str, child_name: &str) {
+        let listing = list_dir(ctx, dir_path);
+        assert!(
+            listing.contains(&child_name.to_owned()),
+            "Unexpected dir contents: {:?}",
+            listing
+        );
+    }
+
     #[test]
     fn changing_current_working_directory() {
         let _lock = TEST_LOCK.lock().unwrap();
@@ -494,8 +515,8 @@ mod tests {
         proc.sc_create("dir/x", FileType::Regular, FilePermissions::ReadWrite)
             .unwrap();
         proc.sc_chdir("/dir").unwrap();
-        assert_eq!(proc.sc_list_dir(".").unwrap(), vec!["x"]);
-        assert!(proc.sc_list_dir("..").unwrap().contains(&"dir".to_owned()));
+        assert_eq!(list_dir(&mut proc, "."), vec!["x"]);
+        assert!(list_dir(&mut proc, "..").contains(&"dir".to_owned()));
     }
 
     #[test]
@@ -504,18 +525,14 @@ mod tests {
         let mut proc = setup();
         proc.sc_create("/myfile", FileType::Regular, FilePermissions::ReadWrite)
             .unwrap();
-        assert!(proc
-            .sc_list_dir("/")
-            .unwrap()
-            .contains(&"myfile".to_owned()));
+        assert!(list_dir(&mut proc, "/").contains(&"myfile".to_owned()));
+
         proc.sc_create("/dir", FileType::Directory, FilePermissions::ReadWrite)
             .unwrap();
         proc.sc_rename("/myfile", "/dir/moved").unwrap();
-        assert!(!proc
-            .sc_list_dir("/")
-            .unwrap()
-            .contains(&"myfile".to_owned()));
-        assert_eq!(proc.sc_list_dir("/dir").unwrap(), vec!["moved"]);
+
+        assert!(!list_dir(&mut proc, "/").contains(&"myfile".to_owned()));
+        assert_eq!(list_dir(&mut proc, "/dir"), vec!["moved"]);
     }
 
     #[test]
@@ -524,14 +541,9 @@ mod tests {
         let mut proc = setup();
         proc.sc_create("/myfile", FileType::Regular, FilePermissions::ReadWrite)
             .unwrap();
-        assert!(proc
-            .sc_list_dir("/")
-            .unwrap()
-            .contains(&"myfile".to_owned()));
+
         proc.sc_rename("myfile", "new_name").unwrap();
-        assert!(proc
-            .sc_list_dir("/")
-            .unwrap()
-            .contains(&"new_name".to_owned()));
+
+        assert_dir_contains(&mut proc, "/", "new_name");
     }
 }

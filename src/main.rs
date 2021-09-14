@@ -135,7 +135,10 @@ fn _stat_line(stat: FileStat) -> String {
         file_type,
         permissions,
         size,
-        format!("[{:?}:{}]", stat.filesystem, stat.inode_number)
+        format!(
+            "[{:?}:{}]",
+            stat.inode_id.filesystem_id, stat.inode_id.number
+        )
     )
 }
 
@@ -180,10 +183,16 @@ fn ls(args: &[&str], sys: &mut Context) {
             if stat.file_type == FileType::Regular {
                 println!("{}", path); //TODO
             } else {
-                match sys.sc_list_dir(path) {
-                    Ok(children) => println!("{}", children.join("\t\t")),
+                //TODO improve error handling
+                let dir_fd = sys.sc_open(path).unwrap();
+                match sys.sc_getdents(dir_fd) {
+                    Ok(dir_entries) => {
+                        let names: Vec<String> = dir_entries.into_iter().map(|e| e.name).collect();
+                        println!("{}", names.join("\t\t"));
+                    }
                     Err(e) => println!("Error: {}", e),
                 };
+                sys.sc_close(dir_fd).unwrap();
             }
         }
         Err(e) => println!("Error: {}", e),
@@ -197,9 +206,12 @@ fn ll(args: &[&str], sys: &mut Context) {
             if stat.file_type == FileType::Regular {
                 println!("{}{:>10}", _stat_line(stat), path);
             } else {
-                match sys.sc_list_dir(path) {
-                    Ok(children) => {
-                        for child_name in children {
+                //TODO improve error handling
+                let dir_fd = sys.sc_open(path).unwrap();
+                match sys.sc_getdents(dir_fd) {
+                    Ok(dir_entries) => {
+                        for dir_entry in dir_entries {
+                            let child_name = dir_entry.name;
                             let child_path = format!("{}/{}", path, child_name);
                             let stat = sys.sc_stat(&child_path).unwrap();
                             println!("{:<44}{}", _stat_line(stat), child_name);
@@ -207,6 +219,7 @@ fn ll(args: &[&str], sys: &mut Context) {
                     }
                     Err(e) => println!("Error: {}", e),
                 };
+                sys.sc_close(dir_fd).unwrap();
             }
         }
         Err(e) => println!("Error: {}", e),

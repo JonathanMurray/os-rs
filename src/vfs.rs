@@ -1,7 +1,7 @@
-use crate::core::{Fd, FilePermissions, FileType, Ino};
+use crate::core::{Fd, FilePermissions, FileType};
 use crate::procfs::ProcFilesystem;
 use crate::regularfs::RegularFilesystem;
-use crate::sys::{FileStat, FilesystemId, Inode, InodeIdentifier};
+use crate::sys::{DirectoryEntry, FileStat, FilesystemId, Inode, InodeIdentifier};
 
 type Result<T> = core::result::Result<T, String>;
 
@@ -162,31 +162,16 @@ impl VirtualFilesystemSwitch {
         let inode = self.resolve_from_parts(&parts, cwd)?;
 
         let permissions = inode.permissions;
-        let inode_number = inode.id.number;
-        let filesystem = format!("{:?}", inode.id.filesystem_id);
 
         Ok(FileStat {
             file_type: inode.file_type,
             size: inode.size,
             permissions,
-            inode_number,
-            filesystem,
+            inode_id: inode.id,
         })
     }
 
-    pub fn list_dir<S: Into<String>>(
-        &mut self,
-        path: S,
-        cwd: InodeIdentifier,
-    ) -> Result<Vec<String>> {
-        let path = path.into();
-        let parts: Vec<&str> = path.split('/').collect();
-        let inode = self.resolve_from_parts(&parts, cwd)?;
-        if !inode.is_dir() {
-            return Err("Not a directory".to_owned());
-        }
-        let inode_id = inode.id;
-
+    pub fn list_dir(&mut self, inode_id: InodeIdentifier) -> Result<Vec<DirectoryEntry>> {
         match inode_id.filesystem_id {
             FilesystemId::Main => self.fs.list_directory(inode_id.number),
             FilesystemId::Proc => self.procfs.list_directory(inode_id.number),
@@ -198,21 +183,20 @@ impl VirtualFilesystemSwitch {
         path: &str,
         cwd: InodeIdentifier,
         fd: Fd,
-    ) -> Result<(FilesystemId, Ino)> {
+    ) -> Result<InodeIdentifier> {
         let parts: Vec<&str> = path.split('/').collect();
         let inode = self.resolve_from_parts(&parts, cwd)?;
-        let fs = inode.id.filesystem_id;
-        let ino = inode.id.number;
+        let inode_id = inode.id;
 
-        match fs {
+        match inode_id.filesystem_id {
             FilesystemId::Main => {
                 // Nothing needs to be done here
             }
             FilesystemId::Proc => {
-                self.procfs.open_file(ino, fd)?;
+                self.procfs.open_file(inode_id.number, fd)?;
             }
         }
-        Ok((fs, ino))
+        Ok(inode_id)
     }
 
     pub fn close_file(&mut self, filesystem: FilesystemId, fd: Fd) -> Result<()> {
@@ -228,28 +212,29 @@ impl VirtualFilesystemSwitch {
     pub fn read_file_at_offset(
         &mut self,
         fd: Fd,
-        filesystem: FilesystemId,
-        inode_number: Ino,
+        inode_id: InodeIdentifier,
         buf: &mut [u8],
         file_offset: usize,
     ) -> Result<usize> {
-        match filesystem {
+        match inode_id.filesystem_id {
             FilesystemId::Proc => self.procfs.read_file_at_offset(fd, buf, file_offset),
-            FilesystemId::Main => self.fs.read_file_at_offset(inode_number, buf, file_offset),
+            FilesystemId::Main => self
+                .fs
+                .read_file_at_offset(inode_id.number, buf, file_offset),
         }
     }
 
     pub fn write_file_at_offset(
         &mut self,
-        filesystem: FilesystemId,
-        inode_number: Ino,
+        inode_id: InodeIdentifier,
         buf: &[u8],
         file_offset: usize,
     ) -> Result<usize> {
-        if filesystem == FilesystemId::Proc {
+        if inode_id.filesystem_id == FilesystemId::Proc {
             Err("Can't write to procfs".to_owned())
         } else {
-            self.fs.write_file_at_offset(inode_number, buf, file_offset)
+            self.fs
+                .write_file_at_offset(inode_id.number, buf, file_offset)
         }
     }
 
