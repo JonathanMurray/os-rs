@@ -2,7 +2,9 @@ use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::core::{Fd, FilePermissions, FileType, Ino, Pid};
+use crate::util::{
+    DirectoryEntry, Fd, FilePermissions, FileStat, FileType, FilesystemId, InodeIdentifier, Pid,
+};
 use crate::vfs::VirtualFilesystemSwitch;
 
 type Result<T> = core::result::Result<T, String>;
@@ -15,14 +17,14 @@ static PROCESSES: Lazy<Mutex<GlobalProcessList>> = Lazy::new(|| {
     })
 });
 
+pub fn processes() -> MutexGuard<'static, GlobalProcessList> {
+    PROCESSES.lock().unwrap()
+}
+
 pub struct GlobalProcessList {
     next_pid: Pid,
     pub processes: HashMap<Pid, Process>,
     pub currently_running_pid: Option<Pid>,
-}
-
-pub fn processes() -> MutexGuard<'static, GlobalProcessList> {
-    PROCESSES.lock().unwrap()
 }
 
 impl GlobalProcessList {
@@ -52,26 +54,6 @@ impl GlobalProcessList {
 }
 
 #[derive(Debug)]
-pub struct System {
-    vfs: VirtualFilesystemSwitch,
-}
-
-#[derive(PartialEq, Debug)]
-pub struct FileStat {
-    pub file_type: FileType,
-    pub size: usize,
-    pub permissions: FilePermissions,
-    pub inode_id: InodeIdentifier,
-}
-
-#[derive(PartialEq, Debug)]
-pub struct DirectoryEntry {
-    pub inode_number: Ino,
-    pub name: String,
-    pub file_type: FileType,
-}
-
-#[derive(Debug)]
 pub struct Process {
     pub pid: Pid,
     pub name: String,
@@ -81,10 +63,20 @@ pub struct Process {
     pub log: Vec<String>,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq)]
-pub enum FilesystemId {
-    Main,
-    Proc,
+impl Process {
+    fn find_open_file_mut(&mut self, fd: Fd) -> Result<&mut OpenFile> {
+        self.open_files
+            .iter_mut()
+            .find(|f| f.fd == fd)
+            .ok_or_else(|| format!("No such fd: {}", fd))
+    }
+
+    fn take_open_file(&mut self, fd: Fd) -> Result<OpenFile> {
+        match self.open_files.iter().position(|f| f.fd == fd) {
+            Some(index) => Ok(self.open_files.swap_remove(index)),
+            None => Err(format!("No such fd: {}", fd)),
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -94,6 +86,11 @@ pub struct OpenFile {
     offset: usize,
 }
 
+#[derive(Debug)]
+pub struct System {
+    vfs: VirtualFilesystemSwitch,
+}
+
 impl System {
     pub fn new() -> Self {
         Self {
@@ -101,54 +98,25 @@ impl System {
         }
     }
 
-    pub fn spawn_process(sys: Arc<Mutex<System>>, process_name: String) -> Context {
+    pub fn spawn_process(sys: Arc<Mutex<System>>, process_name: String) -> ProcessHandle {
         let pid = PROCESSES.lock().unwrap().add(process_name);
-        Context { sys, pid }
+        ProcessHandle { sys, pid }
     }
 }
 
-struct ActiveContext<'a> {
-    sys: MutexGuard<'a, System>,
-}
-
-impl<'a> ActiveContext<'a> {
-    fn new(syscalls: &'a mut Context) -> Self {
-        let sys = syscalls.sys.lock().unwrap();
-        let mut processes = PROCESSES.lock().unwrap();
-        assert!(
-            processes.currently_running_pid.is_none(),
-            "Another process is already active"
-        );
-        processes.currently_running_pid = Some(syscalls.pid);
-
-        ActiveContext { sys }
-    }
-}
-
-impl Drop for ActiveContext<'_> {
-    fn drop(&mut self) {
-        let mut processes = PROCESSES.lock().unwrap();
-        assert!(
-            processes.currently_running_pid.is_some(),
-            "This process is not marked as active"
-        );
-        processes.currently_running_pid = None;
-    }
-}
-
-pub struct Context {
+pub struct ProcessHandle {
     sys: Arc<Mutex<System>>,
     pid: Pid,
 }
 
-impl Context {
+impl ProcessHandle {
     pub fn sc_create<S: Into<String>>(
         &mut self,
         path: S,
         file_type: FileType,
         permissions: FilePermissions,
     ) -> Result<()> {
-        let mut active_context = ActiveContext::new(self);
+        let mut active_context = ActiveProcessHandle::new(self);
         let path = path.into();
         let cwd = {
             let mut processes = PROCESSES.lock().unwrap();
@@ -164,7 +132,7 @@ impl Context {
     }
 
     pub fn sc_open(&mut self, path: &str) -> Result<Fd> {
-        let mut active_context = ActiveContext::new(self);
+        let mut active_context = ActiveProcessHandle::new(self);
         let (cwd, fd) = {
             let mut processes = PROCESSES.lock().unwrap();
             let proc = processes.current();
@@ -186,7 +154,7 @@ impl Context {
     }
 
     pub fn sc_close(&mut self, fd: Fd) -> Result<()> {
-        let mut active_context = ActiveContext::new(self);
+        let mut active_context = ActiveProcessHandle::new(self);
         let open_file = {
             let mut processes = PROCESSES.lock().unwrap();
             let proc = processes.current();
@@ -201,7 +169,7 @@ impl Context {
     }
 
     pub fn sc_stat(&mut self, path: &str) -> Result<FileStat> {
-        let mut active_context = ActiveContext::new(self);
+        let mut active_context = ActiveProcessHandle::new(self);
         let cwd = {
             let mut processes = PROCESSES.lock().unwrap();
             let proc = processes.current();
@@ -213,7 +181,7 @@ impl Context {
     }
 
     pub fn sc_getdents(&mut self, fd: Fd) -> Result<Vec<DirectoryEntry>> {
-        let mut active_context = ActiveContext::new(self);
+        let mut active_context = ActiveProcessHandle::new(self);
         let inode_id = {
             let mut processes = PROCESSES.lock().unwrap();
             let proc = processes.current();
@@ -226,7 +194,7 @@ impl Context {
     }
 
     pub fn sc_read(&mut self, fd: Fd, buf: &mut [u8]) -> Result<usize> {
-        let mut active_context = ActiveContext::new(self);
+        let mut active_context = ActiveProcessHandle::new(self);
         let (inode_id, offset) = {
             let mut processes = PROCESSES.lock().unwrap();
             let proc = processes.current();
@@ -253,7 +221,7 @@ impl Context {
     pub fn sc_write(&mut self, fd: Fd, buf: &[u8]) -> Result<()> {
         //TODO permissions
 
-        let mut active_context = ActiveContext::new(self);
+        let mut active_context = ActiveProcessHandle::new(self);
         let (inode_id, offset) = {
             let mut processes = PROCESSES.lock().unwrap();
             let proc = processes.current();
@@ -277,7 +245,7 @@ impl Context {
     }
 
     pub fn sc_seek(&mut self, fd: Fd, offset: usize) -> Result<()> {
-        let _active_context = ActiveContext::new(self);
+        let _active_context = ActiveProcessHandle::new(self);
         let mut processes = PROCESSES.lock().unwrap();
         let proc = processes.current();
         proc.log.push(format!("seek({}, {})", fd, offset));
@@ -287,7 +255,7 @@ impl Context {
     }
 
     pub fn sc_chdir<S: Into<String>>(&mut self, path: S) -> Result<()> {
-        let mut active_context = ActiveContext::new(self);
+        let mut active_context = ActiveProcessHandle::new(self);
         let path = path.into();
         let cwd = {
             let mut processes = PROCESSES.lock().unwrap();
@@ -307,7 +275,7 @@ impl Context {
     }
 
     pub fn sc_get_current_dir_name(&mut self) -> Result<String> {
-        let mut active_context = ActiveContext::new(self);
+        let mut active_context = ActiveProcessHandle::new(self);
         let cwd = {
             let mut processes = PROCESSES.lock().unwrap();
             let proc = processes.current();
@@ -319,7 +287,7 @@ impl Context {
     }
 
     pub fn sc_remove(&mut self, path: &str) -> Result<()> {
-        let mut active_context = ActiveContext::new(self);
+        let mut active_context = ActiveProcessHandle::new(self);
         let cwd = {
             let mut processes = PROCESSES.lock().unwrap();
             let proc = processes.current();
@@ -331,7 +299,7 @@ impl Context {
     }
 
     pub fn sc_rename<S: Into<String>>(&mut self, old_path: &str, new_path: S) -> Result<()> {
-        let mut active_context = ActiveContext::new(self);
+        let mut active_context = ActiveProcessHandle::new(self);
         let new_path = new_path.into();
         let cwd = {
             let mut processes = PROCESSES.lock().unwrap();
@@ -345,48 +313,40 @@ impl Context {
     }
 }
 
-impl Drop for Context {
+impl Drop for ProcessHandle {
     fn drop(&mut self) {
         let mut processes = PROCESSES.lock().unwrap();
         processes.processes.remove(&self.pid);
     }
 }
 
-impl Process {
-    fn find_open_file_mut(&mut self, fd: Fd) -> Result<&mut OpenFile> {
-        self.open_files
-            .iter_mut()
-            .find(|f| f.fd == fd)
-            .ok_or_else(|| format!("No such fd: {}", fd))
-    }
-
-    fn take_open_file(&mut self, fd: Fd) -> Result<OpenFile> {
-        match self.open_files.iter().position(|f| f.fd == fd) {
-            Some(index) => Ok(self.open_files.swap_remove(index)),
-            None => Err(format!("No such fd: {}", fd)),
-        }
-    }
+struct ActiveProcessHandle<'a> {
+    sys: MutexGuard<'a, System>,
 }
 
-#[derive(Debug, Copy, Clone)]
-pub struct Inode {
-    pub parent_id: InodeIdentifier,
-    pub id: InodeIdentifier,
-    pub file_type: FileType,
-    pub size: usize,
-    pub permissions: FilePermissions,
-}
+impl<'a> ActiveProcessHandle<'a> {
+    fn new(syscalls: &'a mut ProcessHandle) -> Self {
+        let sys = syscalls.sys.lock().unwrap();
+        let mut processes = PROCESSES.lock().unwrap();
+        assert!(
+            processes.currently_running_pid.is_none(),
+            "Another process is already active"
+        );
+        processes.currently_running_pid = Some(syscalls.pid);
 
-impl Inode {
-    pub fn is_dir(&self) -> bool {
-        self.file_type == FileType::Directory
+        ActiveProcessHandle { sys }
     }
 }
 
-#[derive(PartialEq, Debug, Copy, Clone)]
-pub struct InodeIdentifier {
-    pub filesystem_id: FilesystemId,
-    pub number: Ino,
+impl Drop for ActiveProcessHandle<'_> {
+    fn drop(&mut self) {
+        let mut processes = PROCESSES.lock().unwrap();
+        assert!(
+            processes.currently_running_pid.is_some(),
+            "This process is not marked as active"
+        );
+        processes.currently_running_pid = None;
+    }
 }
 
 #[cfg(test)]
@@ -398,7 +358,7 @@ mod tests {
     // System. When running the OS normally, there is exactly one System.
     static TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
-    fn setup() -> Context {
+    fn setup() -> ProcessHandle {
         let sys = System::new();
         System::spawn_process(Arc::new(Mutex::new(sys)), "test".to_owned())
     }
@@ -490,14 +450,14 @@ mod tests {
         assert_eq!(n, 0);
     }
 
-    fn list_dir(ctx: &mut Context, path: &str) -> Vec<String> {
+    fn list_dir(ctx: &mut ProcessHandle, path: &str) -> Vec<String> {
         let fd = ctx.sc_open(path).unwrap();
         let dents = ctx.sc_getdents(fd).unwrap();
         ctx.sc_close(fd).unwrap();
         dents.into_iter().map(|e| e.name).collect()
     }
 
-    fn assert_dir_contains(ctx: &mut Context, dir_path: &str, child_name: &str) {
+    fn assert_dir_contains(ctx: &mut ProcessHandle, dir_path: &str, child_name: &str) {
         let listing = list_dir(ctx, dir_path);
         assert!(
             listing.contains(&child_name.to_owned()),

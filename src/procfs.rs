@@ -2,8 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Read};
 use std::time::Instant;
 
-use crate::core::{Fd, FilePermissions, FileType, Ino, Pid};
-use crate::sys::{self, DirectoryEntry, FilesystemId, Inode, InodeIdentifier};
+use crate::sys::{self};
+use crate::util::{
+    DirectoryEntry, Fd, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier, Pid,
+};
 
 type Result<T> = core::result::Result<T, String>;
 

@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
 
-use crate::core::{FilePermissions, FileType, Ino};
-use crate::sys::{DirectoryEntry, FilesystemId, Inode, InodeIdentifier};
+use crate::util::{
+    DirectoryEntry, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier,
+};
 
 type Result<T> = core::result::Result<T, String>;
 

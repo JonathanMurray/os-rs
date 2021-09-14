@@ -1,7 +1,8 @@
-use crate::core::{Fd, FilePermissions, FileType};
 use crate::procfs::ProcFilesystem;
 use crate::regularfs::RegularFilesystem;
-use crate::sys::{DirectoryEntry, FileStat, FilesystemId, Inode, InodeIdentifier};
+use crate::util::{
+    DirectoryEntry, Fd, FilePermissions, FileStat, FileType, FilesystemId, Inode, InodeIdentifier,
+};
 
 type Result<T> = core::result::Result<T, String>;
 
