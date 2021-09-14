@@ -16,25 +16,34 @@ pub async fn main() {
     let sys = System::new();
     println!("Welcome to the Operating System!");
 
+    let liveness = Arc::new(());
+    let liveness_checker = Arc::clone(&liveness);
+
     let sys = Arc::new(Mutex::new(sys));
+    let sys1 = sys.clone();
     let sys2 = sys.clone();
     let sys3 = sys.clone();
-    let shell_task = tokio::task::spawn_blocking(move || run_shell(sys));
+    let shell_task = tokio::task::spawn_blocking(move || run_shell(sys1));
     let background_task = tokio::task::spawn_blocking(move || run_background_proc(sys2));
-    let idle_task = tokio::task::spawn_blocking(move || run_idle_proc(sys3));
+    let idle_task = tokio::task::spawn_blocking(move || run_idle_proc(sys3, liveness_checker));
 
-    futures::try_join!(shell_task, background_task, idle_task).expect("Joining futures");
+    futures::try_join!(shell_task, background_task, idle_task).expect("Kernel crashed");
 }
 
 fn run_background_proc(sys: Arc<Mutex<System>>) {
     let mut sys = System::spawn_process(sys, "background".to_owned());
 
-    let fd = {
-        sys.sc_create("/uptime", FileType::Regular, FilePermissions::ReadWrite)
-            .expect("Create uptime file");
+    sys.sc_create("README", FileType::Regular, FilePermissions::ReadWrite)
+        .expect("Create README file");
+    let fd = sys.sc_open("README").expect("Open README file");
+    let readme = "Commands:\nstat\ncat\nls\nll\ntouch\nmkdir\ncd\nrm\nmv\nhelp\n";
+    sys.sc_write(fd, readme.as_bytes())
+        .expect("Write to README");
+    sys.sc_close(fd).expect("Close README");
 
-        sys.sc_open("/uptime").expect("Open uptime file")
-    };
+    sys.sc_create("uptime", FileType::Regular, FilePermissions::ReadWrite)
+        .expect("Create uptime file");
+    let fd = sys.sc_open("uptime").expect("Open uptime file");
     let mut secs = 0_u64;
     for _ in 0..50 {
         std::thread::sleep(Duration::from_secs(1));
@@ -48,12 +57,16 @@ fn run_background_proc(sys: Arc<Mutex<System>>) {
             .expect("Write to uptime file");
         }
     }
+    sys.sc_close(fd).expect("Close uptime file");
 }
 
-fn run_idle_proc(sys: Arc<Mutex<System>>) {
-    let _sys = System::spawn_process(sys, "idle".to_owned());
+fn run_idle_proc(sys: Arc<Mutex<System>>, liveness_checker: Arc<()>) {
+    let _proc = System::spawn_process(sys, "idle".to_owned());
     loop {
-        std::thread::sleep(Duration::from_secs(60));
+        std::thread::sleep(Duration::from_secs(5));
+        if Arc::strong_count(&liveness_checker) < 2 {
+            break;
+        }
     }
 }
 
@@ -83,6 +96,7 @@ fn run_shell(sys: Arc<Mutex<System>>) {
                 Some(&"rm") => rm(&words, &mut sys),
                 Some(&"mv") => mv(&words, &mut sys),
                 Some(&"cd") => cd(&words, &mut sys),
+                Some(&"help") => help(&words, &mut sys),
                 None => {}
                 _ => println!("Unknown command"),
             }
@@ -127,31 +141,35 @@ fn _stat_line(stat: FileStat) -> String {
 
 fn cat(args: &[&str], sys: &mut Context) {
     if let Some(&path) = args.get(1) {
-        match sys.sc_open(path) {
-            Ok(fd) => {
-                let mut buf = vec![0; 1024];
-                loop {
-                    match sys.sc_read(fd, &mut buf) {
-                        Ok(n) => {
-                            if n > 0 {
-                                let s = String::from_utf8_lossy(&buf[..n]);
-                                print!("{}", s);
-                            } else {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            println!("Error: {}", e);
+        _cat_file(path, sys);
+    } else {
+        println!("Error: missing arg");
+    }
+}
+
+fn _cat_file(path: &str, sys: &mut Context) {
+    match sys.sc_open(path) {
+        Ok(fd) => {
+            let mut buf = vec![0; 1024];
+            loop {
+                match sys.sc_read(fd, &mut buf) {
+                    Ok(n) => {
+                        if n > 0 {
+                            let s = String::from_utf8_lossy(&buf[..n]);
+                            print!("{}", s);
+                        } else {
                             break;
                         }
                     }
+                    Err(e) => {
+                        println!("Error: {}", e);
+                        break;
+                    }
                 }
-                sys.sc_close(fd).unwrap();
             }
-            Err(e) => println!("Error: {}", e),
+            sys.sc_close(fd).unwrap();
         }
-    } else {
-        println!("Error: missing arg");
+        Err(e) => println!("Error: {}", e),
     }
 }
 
@@ -248,4 +266,8 @@ fn mv(args: &[&str], sys: &mut Context) {
     } else {
         println!("Error: missing arg(s)");
     }
+}
+
+fn help(_args: &[&str], sys: &mut Context) {
+    _cat_file("/README", sys);
 }
