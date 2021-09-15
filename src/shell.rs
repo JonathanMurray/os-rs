@@ -1,5 +1,6 @@
 use crate::sys::ProcessHandle;
-use crate::util::{FilePermissions, FileStat, FileType};
+use crate::util::{FilePermissions, FileStat, FileType, Pid};
+use std::str::FromStr;
 
 type Result<T> = core::result::Result<T, String>;
 
@@ -16,6 +17,7 @@ pub fn handle(sys: &mut ProcessHandle, input: String) {
         Some(&"mv") => mv(&words, sys),
         Some(&"cd") => cd(&words, sys),
         Some(&"help") => help(&words, sys),
+        Some(&"kill") => kill(&words, sys),
         None => Ok(()),
         _ => Err("Unknown command".to_owned()),
     };
@@ -151,4 +153,10 @@ fn mv(args: &[&str], sys: &mut ProcessHandle) -> Result<()> {
 
 fn help(_args: &[&str], sys: &mut ProcessHandle) -> Result<()> {
     _cat_file("/README", sys)
+}
+
+fn kill(args: &[&str], sys: &mut ProcessHandle) -> Result<()> {
+    let pid = args.get(1).ok_or_else(|| "missing arg".to_owned())?;
+    let pid = Pid::from_str(*pid).map_err(|_| "Not a valid pid".to_owned())?;
+    sys.sc_kill(pid)
 }

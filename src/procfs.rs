@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Read};
 use std::time::Instant;
 
-use crate::sys::{self};
+use crate::sys;
 use crate::util::{
     DirectoryEntry, Fd, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier, Pid,
 };
@@ -34,13 +34,13 @@ impl ProcFilesystem {
                 let uptime = Instant::now().duration_since(self.startup_time);
                 content.push_str(&format!("uptime: {:.2}\n", uptime.as_secs_f32()));
                 let processes = sys::processes();
-                let current_pid = processes.currently_running_pid.unwrap();
-                content.push_str(&format!("{} processes:\n", processes.processes.len()));
-                for (pid, proc) in processes.processes.iter() {
-                    if &current_pid == pid {
+                let current_pid = processes.current_pid();
+                content.push_str(&format!("{} processes:\n", processes.count()));
+                for proc in processes.iter() {
+                    if current_pid == proc.pid {
                         content.push_str(&format!("* {}: {}\n", proc.pid, proc.name));
                     } else {
-                        content.push_str(&format!("  {}: {}\n", pid, proc.name));
+                        content.push_str(&format!("  {}: {}\n", proc.pid, proc.name));
                     };
                     content.push_str(&format!("    open files: {:?}\n", proc.open_files));
                 }
@@ -49,7 +49,7 @@ impl ProcFilesystem {
             }
             0 => {
                 let processes = sys::processes();
-                let current_pid = processes.currently_running_pid.unwrap();
+                let current_pid = processes.current_pid();
                 self.open_directories.insert((current_pid, fd));
                 Ok(())
             }
@@ -58,7 +58,7 @@ impl ProcFilesystem {
                     let mut processes = sys::processes();
                     let pid = inode_number - 1000;
 
-                    if let Some(proc) = processes.processes.get(&pid) {
+                    if let Some(proc) = processes.process(pid) {
                         let mut content = String::new();
                         content.push_str("Syscall log:\n");
                         for log_line in &proc.log {
@@ -119,10 +119,10 @@ impl ProcFilesystem {
             }),
             _ => {
                 if inode_number >= 1000 {
-                    let processes = sys::processes();
+                    let mut processes = sys::processes();
                     let pid = inode_number - 1000;
 
-                    if processes.processes.contains_key(&pid) {
+                    if processes.process(pid).is_some() {
                         return Ok(Inode {
                             parent_id: InodeIdentifier {
                                 filesystem_id: FilesystemId::Proc,
@@ -157,8 +157,8 @@ impl ProcFilesystem {
                 }];
                 let processes = sys::processes();
                 let pid_files: Vec<DirectoryEntry> = processes
-                    .processes
-                    .keys()
+                    .iter()
+                    .map(|proc| proc.pid)
                     .map(|pid| DirectoryEntry {
                         inode_number: 1000 + pid,
                         name: format!("{}", pid),
@@ -190,8 +190,8 @@ impl ProcFilesystem {
                 }
 
                 if let Ok(pid) = child_name.parse::<Pid>() {
-                    let processes = sys::processes();
-                    if processes.processes.contains_key(&pid) {
+                    let mut processes = sys::processes();
+                    if processes.process(pid).is_some() {
                         return Ok(InodeIdentifier {
                             filesystem_id: FilesystemId::Proc,
                             number: 1000 + pid,
@@ -219,7 +219,7 @@ impl ProcFilesystem {
         let content = self
             .file_contents
             .get(&(current_proc.pid, fd))
-            .expect("No such open proc file");
+            .ok_or("No such open proc file")?;
         let mut cursor = Cursor::new(&content);
         cursor.set_position(file_offset as u64);
         let num_read = cursor.read(buf).expect("Failed to read from file");

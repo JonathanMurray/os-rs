@@ -1,33 +1,36 @@
-use once_cell::sync::Lazy;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard};
-
 use crate::util::{
     DirectoryEntry, Fd, FilePermissions, FileStat, FileType, FilesystemId, InodeIdentifier, Pid,
 };
 use crate::vfs::VirtualFilesystemSwitch;
+use once_cell::sync::Lazy;
+use std::collections::{HashMap, LinkedList};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 type Result<T> = core::result::Result<T, String>;
 
-static PROCESSES: Lazy<Mutex<GlobalProcessList>> = Lazy::new(|| {
-    Mutex::new(GlobalProcessList {
+static GLOBAL_PROCESS_TABLE: Lazy<Mutex<GlobalProcessTable>> = Lazy::new(|| {
+    Mutex::new(GlobalProcessTable {
         next_pid: 0,
         processes: Default::default(),
         currently_running_pid: None,
+        spawned_but_not_yet_handled: Default::default(),
     })
 });
 
-pub fn processes() -> MutexGuard<'static, GlobalProcessList> {
-    PROCESSES.lock().unwrap()
+pub fn processes() -> MutexGuard<'static, GlobalProcessTable> {
+    GLOBAL_PROCESS_TABLE.lock().unwrap()
 }
 
-pub struct GlobalProcessList {
+pub struct GlobalProcessTable {
     next_pid: Pid,
-    pub processes: HashMap<Pid, Process>,
-    pub currently_running_pid: Option<Pid>,
+    processes: HashMap<Pid, ProcessTableEntry>,
+    currently_running_pid: Option<Pid>,
+    //TODO Improve how this is handled
+    pub spawned_but_not_yet_handled: LinkedList<ProcessHandle>,
 }
 
-impl GlobalProcessList {
+impl GlobalProcessTable {
     fn add(&mut self, process_name: String) -> Pid {
         let pid = self.next_pid;
         self.next_pid += 1;
@@ -43,14 +46,65 @@ impl GlobalProcessList {
             log: vec![],
         };
 
-        self.processes.insert(pid, proc);
+        let pending_kill_signals = Default::default();
+        let entry = ProcessTableEntry {
+            process: proc,
+            pending_kill_signals,
+        };
+
+        self.processes.insert(pid, entry);
         pid
+    }
+
+    fn kill(&mut self, pid: Pid) -> Result<()> {
+        if self.currently_running_pid == Some(pid) {
+            return Err("Cannot kill currently running process".to_owned());
+        }
+        let signals = &mut self
+            .processes
+            .get_mut(&pid)
+            .ok_or_else(|| "No process with that pid".to_owned())?
+            .pending_kill_signals;
+
+        signals.push_front(());
+
+        Ok(())
+    }
+
+    pub fn process(&mut self, pid: Pid) -> Option<&mut Process> {
+        self.processes.get_mut(&pid).map(|entry| &mut entry.process)
+    }
+
+    pub fn current_pid(&self) -> Pid {
+        self.currently_running_pid.unwrap()
     }
 
     pub fn current(&mut self) -> &mut Process {
         let pid = self.currently_running_pid.unwrap();
-        self.processes.get_mut(&pid).unwrap()
+        &mut self.processes.get_mut(&pid).unwrap().process
     }
+
+    pub fn current_process_pending_kill_signal(&mut self) -> Option<()> {
+        let pid = self.currently_running_pid.unwrap();
+        self.processes
+            .get_mut(&pid)
+            .unwrap()
+            .pending_kill_signals
+            .pop_back()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Process> {
+        self.processes.iter().map(|(_pid, entry)| &entry.process)
+    }
+
+    pub fn count(&self) -> usize {
+        self.processes.len()
+    }
+}
+
+struct ProcessTableEntry {
+    process: Process,
+    pending_kill_signals: LinkedList<()>,
 }
 
 #[derive(Debug)]
@@ -99,7 +153,7 @@ impl System {
     }
 
     pub fn spawn_process(sys: Arc<Mutex<System>>, process_name: String) -> ProcessHandle {
-        let pid = PROCESSES.lock().unwrap().add(process_name);
+        let pid = processes().add(process_name);
         ProcessHandle { sys, pid }
     }
 }
@@ -110,16 +164,89 @@ pub struct ProcessHandle {
 }
 
 impl ProcessHandle {
+    pub fn process_name(&mut self) -> String {
+        let _active_context = ActiveProcessHandle::new(self).unwrap();
+        let mut processes = processes();
+        processes.current().name.clone()
+    }
+
+    pub fn pending_kill_signal(&mut self) -> Option<()> {
+        //TODO make ActiveProcessHandle::new() not return Result again
+        let _active_context = ActiveProcessHandle::new(self).unwrap();
+        let mut processes = processes();
+        processes.current_process_pending_kill_signal()
+    }
+
+    pub fn sc_spawn<S: Into<String>>(&mut self, path: S) -> Result<Pid> {
+        let path = path.into();
+
+        let child_pid = {
+            let mut active_handle = ActiveProcessHandle::new(self)?;
+
+            let cwd = {
+                let mut processes = processes();
+                let proc = processes.current();
+                proc.log.push(format!("spawn({:?})", path));
+                proc.cwd
+            };
+
+            let _stat = active_handle.sys.vfs.stat_file(&path, cwd)?;
+
+            let mut processes = processes();
+            processes.add(path)
+        };
+
+        let child_handle = ProcessHandle {
+            sys: self.sys.clone(),
+            pid: child_pid,
+        };
+
+        let mut processes = processes();
+        processes
+            .spawned_but_not_yet_handled
+            .push_front(child_handle);
+
+        Ok(child_pid)
+    }
+
+    pub fn sc_wait_pid(&mut self, pid: Pid) -> Result<()> {
+        {
+            let _active_context = ActiveProcessHandle::new(self)?;
+            let mut processes = processes();
+            let proc = processes.current();
+            proc.log.push(format!("wait_pid({})", pid));
+        }
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+
+            let _active_context = ActiveProcessHandle::new(self)?;
+            let processes = processes();
+            if !processes.processes.contains_key(&pid) {
+                return Ok(());
+            }
+        }
+    }
+
+    pub fn sc_kill(&mut self, pid: Pid) -> Result<()> {
+        //we only support SIGKILL for now.
+        let _active_context = ActiveProcessHandle::new(self)?;
+        let mut processes = processes();
+        let proc = processes.current();
+        proc.log.push(format!("kill({})", pid));
+
+        processes.kill(pid)
+    }
+
     pub fn sc_create<S: Into<String>>(
         &mut self,
         path: S,
         file_type: FileType,
         permissions: FilePermissions,
     ) -> Result<()> {
-        let mut active_context = ActiveProcessHandle::new(self);
+        let mut active_context = ActiveProcessHandle::new(self)?;
         let path = path.into();
         let cwd = {
-            let mut processes = PROCESSES.lock().unwrap();
+            let mut processes = processes();
             let proc = processes.current();
             proc.log.push(format!("create({:?})", path));
             proc.cwd
@@ -132,9 +259,9 @@ impl ProcessHandle {
     }
 
     pub fn sc_open(&mut self, path: &str) -> Result<Fd> {
-        let mut active_context = ActiveProcessHandle::new(self);
+        let mut active_context = ActiveProcessHandle::new(self)?;
         let (cwd, fd) = {
-            let mut processes = PROCESSES.lock().unwrap();
+            let mut processes = processes();
             let proc = processes.current();
             proc.log.push(format!("open({:?})", path));
             (proc.cwd, proc.next_fd)
@@ -142,7 +269,7 @@ impl ProcessHandle {
 
         let inode_id = active_context.sys.vfs.open_file(path, cwd, fd)?;
 
-        let mut processes = PROCESSES.lock().unwrap();
+        let mut processes = processes();
         let proc = processes.current();
         proc.next_fd += 1;
         proc.open_files.push(OpenFile {
@@ -154,9 +281,9 @@ impl ProcessHandle {
     }
 
     pub fn sc_close(&mut self, fd: Fd) -> Result<()> {
-        let mut active_context = ActiveProcessHandle::new(self);
+        let mut active_context = ActiveProcessHandle::new(self)?;
         let open_file = {
-            let mut processes = PROCESSES.lock().unwrap();
+            let mut processes = processes();
             let proc = processes.current();
             proc.log.push(format!("close({})", fd));
             proc.take_open_file(fd)?
@@ -169,9 +296,9 @@ impl ProcessHandle {
     }
 
     pub fn sc_stat(&mut self, path: &str) -> Result<FileStat> {
-        let mut active_context = ActiveProcessHandle::new(self);
+        let mut active_context = ActiveProcessHandle::new(self)?;
         let cwd = {
-            let mut processes = PROCESSES.lock().unwrap();
+            let mut processes = processes();
             let proc = processes.current();
             proc.log.push(format!("stat({:?})", path));
             proc.cwd
@@ -181,9 +308,9 @@ impl ProcessHandle {
     }
 
     pub fn sc_getdents(&mut self, fd: Fd) -> Result<Vec<DirectoryEntry>> {
-        let mut active_context = ActiveProcessHandle::new(self);
+        let mut active_context = ActiveProcessHandle::new(self)?;
         let inode_id = {
-            let mut processes = PROCESSES.lock().unwrap();
+            let mut processes = processes();
             let proc = processes.current();
             proc.log.push(format!("getdents({})", fd));
             let of = proc.find_open_file_mut(fd)?;
@@ -194,9 +321,9 @@ impl ProcessHandle {
     }
 
     pub fn sc_read(&mut self, fd: Fd, buf: &mut [u8]) -> Result<usize> {
-        let mut active_context = ActiveProcessHandle::new(self);
+        let mut active_context = ActiveProcessHandle::new(self)?;
         let (inode_id, offset) = {
-            let mut processes = PROCESSES.lock().unwrap();
+            let mut processes = processes();
             let proc = processes.current();
             proc.log.push(format!("read({}, buf)", fd));
             let of = proc.find_open_file_mut(fd)?;
@@ -209,7 +336,7 @@ impl ProcessHandle {
             .read_file_at_offset(fd, inode_id, buf, offset);
 
         if let Ok(num_read) = result {
-            let mut processes = PROCESSES.lock().unwrap();
+            let mut processes = processes();
             let proc = processes.current();
             let mut of = proc.find_open_file_mut(fd)?;
 
@@ -221,9 +348,9 @@ impl ProcessHandle {
     pub fn sc_write(&mut self, fd: Fd, buf: &[u8]) -> Result<()> {
         //TODO permissions
 
-        let mut active_context = ActiveProcessHandle::new(self);
+        let mut active_context = ActiveProcessHandle::new(self)?;
         let (inode_id, offset) = {
-            let mut processes = PROCESSES.lock().unwrap();
+            let mut processes = processes();
             let proc = processes.current();
             proc.log
                 .push(format!("write({}, <{} bytes>)", fd, buf.len()));
@@ -237,7 +364,7 @@ impl ProcessHandle {
             .vfs
             .write_file_at_offset(inode_id, buf, offset)?;
 
-        let mut processes = PROCESSES.lock().unwrap();
+        let mut processes = processes();
         let proc = processes.current();
         let mut open_file = proc.find_open_file_mut(fd)?;
         open_file.offset += num_written;
@@ -245,8 +372,8 @@ impl ProcessHandle {
     }
 
     pub fn sc_seek(&mut self, fd: Fd, offset: usize) -> Result<()> {
-        let _active_context = ActiveProcessHandle::new(self);
-        let mut processes = PROCESSES.lock().unwrap();
+        let _active_context = ActiveProcessHandle::new(self)?;
+        let mut processes = processes();
         let proc = processes.current();
         proc.log.push(format!("seek({}, {})", fd, offset));
         let mut of = proc.find_open_file_mut(fd)?;
@@ -255,10 +382,10 @@ impl ProcessHandle {
     }
 
     pub fn sc_chdir<S: Into<String>>(&mut self, path: S) -> Result<()> {
-        let mut active_context = ActiveProcessHandle::new(self);
+        let mut active_context = ActiveProcessHandle::new(self)?;
         let path = path.into();
         let cwd = {
-            let mut processes = PROCESSES.lock().unwrap();
+            let mut processes = processes();
             let proc = processes.current();
             proc.log.push(format!("chdir({:?})", path));
             proc.cwd
@@ -268,16 +395,16 @@ impl ProcessHandle {
 
         let cwd = new_cwd_inode.id;
 
-        let mut processes = PROCESSES.lock().unwrap();
+        let mut processes = processes();
         let mut proc = processes.current();
         proc.cwd = cwd;
         Ok(())
     }
 
     pub fn sc_get_current_dir_name(&mut self) -> Result<String> {
-        let mut active_context = ActiveProcessHandle::new(self);
+        let mut active_context = ActiveProcessHandle::new(self)?;
         let cwd = {
-            let mut processes = PROCESSES.lock().unwrap();
+            let mut processes = processes();
             let proc = processes.current();
             proc.log.push("get_current_dir_name()".to_owned());
             proc.cwd
@@ -287,9 +414,9 @@ impl ProcessHandle {
     }
 
     pub fn sc_remove(&mut self, path: &str) -> Result<()> {
-        let mut active_context = ActiveProcessHandle::new(self);
+        let mut active_context = ActiveProcessHandle::new(self)?;
         let cwd = {
-            let mut processes = PROCESSES.lock().unwrap();
+            let mut processes = processes();
             let proc = processes.current();
             proc.log.push(format!("remove({:?})", path));
             proc.cwd
@@ -299,10 +426,10 @@ impl ProcessHandle {
     }
 
     pub fn sc_rename<S: Into<String>>(&mut self, old_path: &str, new_path: S) -> Result<()> {
-        let mut active_context = ActiveProcessHandle::new(self);
+        let mut active_context = ActiveProcessHandle::new(self)?;
         let new_path = new_path.into();
         let cwd = {
-            let mut processes = PROCESSES.lock().unwrap();
+            let mut processes = processes();
             let proc = processes.current();
             proc.log
                 .push(format!("rename({:?}, {:?})", old_path, new_path));
@@ -315,7 +442,7 @@ impl ProcessHandle {
 
 impl Drop for ProcessHandle {
     fn drop(&mut self) {
-        let mut processes = PROCESSES.lock().unwrap();
+        let mut processes = processes();
         processes.processes.remove(&self.pid);
     }
 }
@@ -325,22 +452,27 @@ struct ActiveProcessHandle<'a> {
 }
 
 impl<'a> ActiveProcessHandle<'a> {
-    fn new(syscalls: &'a mut ProcessHandle) -> Self {
+    fn new(syscalls: &'a mut ProcessHandle) -> Result<Self> {
         let sys = syscalls.sys.lock().unwrap();
-        let mut processes = PROCESSES.lock().unwrap();
+        let mut processes = processes();
         assert!(
             processes.currently_running_pid.is_none(),
             "Another process is already active"
         );
+        assert!(
+            processes.process(syscalls.pid).is_some(),
+            "This process is not running"
+        );
+
         processes.currently_running_pid = Some(syscalls.pid);
 
-        ActiveProcessHandle { sys }
+        Ok(ActiveProcessHandle { sys })
     }
 }
 
 impl Drop for ActiveProcessHandle<'_> {
     fn drop(&mut self) {
-        let mut processes = PROCESSES.lock().unwrap();
+        let mut processes = processes();
         assert!(
             processes.currently_running_pid.is_some(),
             "This process is not marked as active"

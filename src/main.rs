@@ -9,31 +9,64 @@ use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::sys::*;
-use crate::util::*;
+use crate::sys::{ProcessHandle, System};
+use crate::util::{FilePermissions, FileType};
 
 #[tokio::main]
 pub async fn main() {
-    let sys = System::new();
     println!("Welcome to the Operating System!");
 
     let liveness = Arc::new(());
-    let liveness_checker = Arc::clone(&liveness);
 
+    let sys = System::new();
     let sys = Arc::new(Mutex::new(sys));
-    let sys1 = sys.clone();
-    let sys2 = sys.clone();
-    let sys3 = sys.clone();
-    let shell_task = tokio::task::spawn_blocking(move || run_shell_proc(sys1));
-    let background_task = tokio::task::spawn_blocking(move || run_background_proc(sys2));
-    let idle_task = tokio::task::spawn_blocking(move || run_idle_proc(sys3, liveness_checker));
+    let _shell_task = {
+        let handle = System::spawn_process(sys.clone(), "shell".to_owned());
+        tokio::task::spawn_blocking(move || run_shell_proc(handle))
+    };
+    let _background_task = {
+        let handle = System::spawn_process(sys.clone(), "background".to_owned());
+        tokio::task::spawn_blocking(move || run_background_proc(handle))
+    };
+    let _idle_task = {
+        let handle = System::spawn_process(sys, "idle".to_owned());
 
-    futures::try_join!(shell_task, background_task, idle_task).expect("Kernel crashed");
+        let liveness = Arc::clone(&liveness);
+        tokio::task::spawn_blocking(move || run_idle_proc(handle, liveness))
+    };
+
+    loop {
+        std::thread::sleep(Duration::from_secs(1));
+        {
+            let mut processes = sys::processes();
+            if let Some(new_handle) = processes.spawned_but_not_yet_handled.pop_back() {
+                tokio::task::spawn_blocking(move || run_script_proc(new_handle));
+            }
+        }
+    }
+
+    //futures::try_join!(shell_task, background_task, idle_task).expect("Kernel crashed");
 }
 
-fn run_background_proc(sys: Arc<Mutex<System>>) {
-    let mut sys = System::spawn_process(sys, "background".to_owned());
+fn run_script_proc(mut handle: ProcessHandle) {
+    let name = handle.process_name();
+    match name.as_ref() {
+        "/bin/script" => {}
+        _ => todo!("Handle bad script path"),
+    }
 
+    for _ in 0..5 {
+        if handle.pending_kill_signal().is_some() {
+            //SIGKILL
+            break;
+            // TODO: exit differently if we get killed than if we run to the end
+            // This matters for the parent process that is listening
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn run_background_proc(mut sys: ProcessHandle) {
     sys.sc_create("README", FileType::Regular, FilePermissions::ReadWrite)
         .expect("Create README file");
     let fd = sys.sc_open("README").expect("Open README file");
@@ -47,6 +80,11 @@ fn run_background_proc(sys: Arc<Mutex<System>>) {
     let fd = sys.sc_open("uptime").expect("Open uptime file");
     let mut secs = 0_u64;
     for _ in 0..50 {
+        if sys.pending_kill_signal().is_some() {
+            //SIGKILL
+            break;
+        }
+
         std::thread::sleep(Duration::from_secs(1));
         secs += 1;
         {
@@ -61,21 +99,34 @@ fn run_background_proc(sys: Arc<Mutex<System>>) {
     sys.sc_close(fd).expect("Close uptime file");
 }
 
-fn run_idle_proc(sys: Arc<Mutex<System>>, liveness_checker: Arc<()>) {
-    let _proc = System::spawn_process(sys, "idle".to_owned());
+fn run_idle_proc(mut handle: ProcessHandle, liveness_checker: Arc<()>) {
+    handle
+        .sc_create("/bin", FileType::Directory, FilePermissions::ReadOnly)
+        .unwrap();
+    handle
+        .sc_create("/bin/script", FileType::Regular, FilePermissions::ReadOnly)
+        .unwrap();
+
     loop {
-        std::thread::sleep(Duration::from_secs(5));
+        if handle.pending_kill_signal().is_some() {
+            //SIGKILL
+            break;
+        }
+
+        let child_pid = handle
+            .sc_spawn("/bin/script")
+            .expect("spawn child from init");
+        handle.sc_wait_pid(child_pid).unwrap();
+
         if Arc::strong_count(&liveness_checker) < 2 {
             break;
         }
     }
 }
 
-fn run_shell_proc(sys: Arc<Mutex<System>>) {
+fn run_shell_proc(mut sys: ProcessHandle) {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
-
-    let mut sys = System::spawn_process(sys, "shell".to_owned());
 
     loop {
         let current_dir_name = sys.sc_get_current_dir_name().expect("Must have valid cwd");
