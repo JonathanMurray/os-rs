@@ -91,7 +91,7 @@ impl VirtualFilesystemSwitch {
         Ok(())
     }
 
-    pub fn remove_file(&mut self, path: &str, cwd: InodeIdentifier) -> Result<()> {
+    pub fn unlink_file(&mut self, path: &str, cwd: InodeIdentifier) -> Result<()> {
         let parts: Vec<&str> = path.split('/').collect();
         let inode = self.resolve_from_parts(&parts, cwd)?;
         let inode_id = inode.id;
@@ -105,7 +105,8 @@ impl VirtualFilesystemSwitch {
 
         match inode_id.filesystem_id {
             FilesystemId::Main => {
-                self.fs.remove_inode(inode_id);
+                self.fs.remove_inode(inode_id.number);
+                // Hack: we assume that parent is on same FS as child
                 self.fs
                     .remove_child_from_directory(parent_id.number, inode_id)
             }
@@ -191,7 +192,7 @@ impl VirtualFilesystemSwitch {
 
         match inode_id.filesystem_id {
             FilesystemId::Main => {
-                // Nothing needs to be done here
+                self.fs.open_file(inode_id.number, fd)?;
             }
             FilesystemId::Proc => {
                 self.procfs.open_file(inode_id.number, fd)?;
@@ -202,10 +203,7 @@ impl VirtualFilesystemSwitch {
 
     pub fn close_file(&mut self, filesystem: FilesystemId, fd: Fd) -> Result<()> {
         match filesystem {
-            FilesystemId::Main => {
-                // Nothing needs to be done here
-                Ok(())
-            }
+            FilesystemId::Main => self.fs.close_file(fd),
             FilesystemId::Proc => self.procfs.close_file(fd),
         }
     }

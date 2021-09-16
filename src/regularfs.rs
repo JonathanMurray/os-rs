@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::{Cursor, Read};
 
 use crate::util::{
-    DirectoryEntry, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier,
+    DirectoryEntry, Fd, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier,
 };
 
 type Result<T> = core::result::Result<T, String>;
@@ -11,24 +11,54 @@ type Directory = HashMap<String, InodeIdentifier>;
 type RegularFile = Vec<u8>;
 
 #[derive(Debug)]
+enum FileContent {
+    Dir(Directory),
+    Regular(RegularFile),
+}
+
+#[derive(Debug)]
+struct File {
+    content: FileContent,
+    fds: Vec<Fd>,
+}
+
+impl File {
+    fn new(file_type: FileType) -> Self {
+        match file_type {
+            FileType::Directory => Self {
+                content: FileContent::Dir(Default::default()),
+                fds: Default::default(),
+            },
+            FileType::Regular => Self {
+                content: FileContent::Regular(Default::default()),
+                fds: Default::default(),
+            },
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct RegularFilesystem {
     inodes: Vec<Inode>,
     next_inode_number: Ino,
-    directories: HashMap<Ino, Directory>,
-    regular_files: HashMap<Ino, RegularFile>,
+    files: HashMap<Ino, File>,
 }
 
 impl RegularFilesystem {
     pub fn new(root_inode: Inode) -> Self {
         let next_inode_number = root_inode.id.number + 1;
-        let mut directories = HashMap::new();
-        directories.insert(root_inode.id.number, Default::default());
-        let regular_files = HashMap::new();
+        let mut files = HashMap::new();
+        files.insert(
+            root_inode.id.number,
+            File {
+                content: FileContent::Dir(Default::default()),
+                fds: Default::default(),
+            },
+        );
         Self {
             inodes: vec![root_inode],
             next_inode_number,
-            directories,
-            regular_files,
+            files,
         }
     }
 
@@ -51,35 +81,35 @@ impl RegularFilesystem {
             permissions,
         };
         self.inodes.push(inode);
-
-        match file_type {
-            FileType::Regular => {
-                self.regular_files.insert(inode_number, Default::default());
-            }
-            FileType::Directory => {
-                self.directories.insert(inode_number, Default::default());
-            }
-        }
+        self.files.insert(inode_number, File::new(file_type));
 
         inode_number
     }
 
-    pub fn remove_inode(&mut self, inode_id: InodeIdentifier) {
+    pub fn remove_inode(&mut self, inode_number: Ino) {
         //TODO remove directory / regular file
-        self.inodes.retain(|inode| inode.id != inode_id);
+        //TODO if someone has an open file, don't delete it in such a way that
+        // read/writes start failing for that process
+        self.inodes.retain(|inode| inode.id.number != inode_number);
     }
 
     fn directory_mut(&mut self, inode_number: Ino) -> Result<&mut Directory> {
-        match self.directories.get_mut(&inode_number) {
-            Some(dir) => Ok(dir),
-            None => Err(format!("No directory with inode number: {}", inode_number)),
+        match self
+            .files
+            .get_mut(&inode_number)
+            .map(|file| &mut file.content)
+        {
+            Some(FileContent::Dir(dir)) => Ok(dir),
+            Some(FileContent::Regular(_)) => Err(format!("Not a directory: {}", inode_number)),
+            None => Err(format!("No file with inode number: {}", inode_number)),
         }
     }
 
     fn directory(&self, inode_number: Ino) -> Result<&Directory> {
-        match self.directories.get(&inode_number) {
-            Some(dir) => Ok(dir),
-            None => Err(format!("No directory with inode number: {}", inode_number)),
+        match self.files.get(&inode_number).map(|file| &file.content) {
+            Some(FileContent::Dir(dir)) => Ok(dir),
+            Some(FileContent::Regular(_)) => Err(format!("Not a directory: {}", inode_number)),
+            None => Err(format!("No file with inode number: {}", inode_number)),
         }
     }
 
@@ -155,20 +185,47 @@ impl RegularFilesystem {
         Ok(*child_id)
     }
 
+    pub fn open_file(&mut self, inode_number: Ino, fd: Fd) -> Result<()> {
+        let file = self
+            .files
+            .get_mut(&inode_number)
+            .ok_or_else(|| "No such file".to_owned())?;
+
+        assert!(
+            !file.fds.contains(&fd),
+            "{} is already opened with fd {}",
+            inode_number,
+            fd
+        );
+        file.fds.push(fd);
+        eprintln!("Opened inode {} with fd {}", inode_number, fd);
+        Ok(())
+    }
+
+    pub fn close_file(&mut self, fd: Fd) -> Result<()> {
+        for file in self.files.values_mut() {
+            file.fds.retain(|open_fd| *open_fd != fd);
+        }
+
+        eprintln!("Closed fd {}", fd);
+        Ok(())
+    }
+
     pub fn read_file_at_offset(
         &mut self,
         inode_number: Ino,
         buf: &mut [u8],
         file_offset: usize,
     ) -> Result<usize> {
-        match self.regular_files.get(&inode_number) {
-            Some(regular_file) => {
+        match self.files.get(&inode_number).map(|file| &file.content) {
+            Some(FileContent::Regular(regular_file)) => {
                 let mut cursor = Cursor::new(&regular_file);
                 cursor.set_position(file_offset as u64);
                 let num_read = cursor.read(buf).expect("Failed to read from file");
                 Ok(num_read)
             }
-            None => Err("No such regular file".to_owned()),
+            Some(FileContent::Dir(_)) => Err("It's a directory".to_owned()),
+            None => Err("No such file".to_owned()),
         }
     }
 
@@ -180,8 +237,12 @@ impl RegularFilesystem {
     ) -> Result<usize> {
         //TODO permissions
 
-        match self.regular_files.get_mut(&inode_number) {
-            Some(f) => {
+        match self
+            .files
+            .get_mut(&inode_number)
+            .map(|file| &mut file.content)
+        {
+            Some(FileContent::Regular(f)) => {
                 let mut num_written = 0;
                 for &b in buf {
                     if file_offset < f.len() {
@@ -193,11 +254,14 @@ impl RegularFilesystem {
                     num_written += 1;
                 }
 
-                self.inode_mut(inode_number).expect("Inode must exist").size = f.len();
+                self.inode_mut(inode_number)
+                    .expect("Inode must exist at write")
+                    .size = f.len();
 
                 Ok(num_written)
             }
-            None => Err("No such regular file".to_owned()),
+            Some(FileContent::Dir(_)) => Err("It's a directory".to_owned()),
+            None => Err("No such file".to_owned()),
         }
     }
 

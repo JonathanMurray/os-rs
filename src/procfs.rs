@@ -1,13 +1,19 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Read};
+use std::sync::MutexGuard;
 use std::time::Instant;
 
-use crate::sys;
+use crate::sys::{GlobalProcessTable, GLOBAL_PROCESS_TABLE};
 use crate::util::{
     DirectoryEntry, Fd, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier, Pid,
 };
 
 type Result<T> = core::result::Result<T, String>;
+
+fn lock_global_process_table() -> MutexGuard<'static, GlobalProcessTable> {
+    // LOCKING: VFS must never be accessed while holding this lock
+    GLOBAL_PROCESS_TABLE.lock().unwrap()
+}
 
 #[derive(Debug)]
 pub struct ProcFilesystem {
@@ -33,10 +39,10 @@ impl ProcFilesystem {
                 let mut content = String::new();
                 let uptime = Instant::now().duration_since(self.startup_time);
                 content.push_str(&format!("uptime: {:.2}\n", uptime.as_secs_f32()));
-                let processes = sys::processes();
-                let current_pid = processes.current_pid();
-                content.push_str(&format!("{} processes:\n", processes.count()));
-                for proc in processes.iter() {
+                let process_table_lock = lock_global_process_table();
+                let current_pid = process_table_lock.current_pid();
+                content.push_str(&format!("{} processes:\n", process_table_lock.count()));
+                for proc in process_table_lock.iter() {
                     if current_pid == proc.pid {
                         content.push_str(&format!("* {}: {}\n", proc.pid, proc.name));
                     } else {
@@ -51,24 +57,24 @@ impl ProcFilesystem {
                 Ok(())
             }
             0 => {
-                let processes = sys::processes();
-                let current_pid = processes.current_pid();
+                let process_table_lock = lock_global_process_table();
+                let current_pid = process_table_lock.current_pid();
                 self.open_directories.insert((current_pid, fd));
                 Ok(())
             }
             _ => {
                 if inode_number >= 1000 {
-                    let mut processes = sys::processes();
+                    let mut process_table_lock = lock_global_process_table();
                     let pid = inode_number - 1000;
 
-                    if let Some(proc) = processes.process(pid) {
+                    if let Some(proc) = process_table_lock.process(pid) {
                         let mut content = String::new();
                         content.push_str("Syscall log:\n");
                         for log_line in &proc.log {
                             content.push_str(log_line);
                             content.push('\n');
                         }
-                        let current_pid = processes.current().pid;
+                        let current_pid = process_table_lock.current().pid;
                         self.file_contents.insert((current_pid, fd), content);
                         return Ok(());
                     } else {
@@ -85,8 +91,8 @@ impl ProcFilesystem {
     }
 
     pub fn close_file(&mut self, fd: Fd) -> Result<()> {
-        let mut processes = sys::processes();
-        let proc = processes.current();
+        let mut process_table_lock = lock_global_process_table();
+        let proc = process_table_lock.current();
         let closed_regular_file = self.file_contents.remove(&(proc.pid, fd)).is_some();
         if !closed_regular_file && !self.open_directories.remove(&(proc.pid, fd)) {
             return Err(format!("No file with fd: {}", fd));
@@ -122,10 +128,10 @@ impl ProcFilesystem {
             }),
             _ => {
                 if inode_number >= 1000 {
-                    let mut processes = sys::processes();
+                    let mut process_table_lock = lock_global_process_table();
                     let pid = inode_number - 1000;
 
-                    if processes.process(pid).is_some() {
+                    if process_table_lock.process(pid).is_some() {
                         return Ok(Inode {
                             parent_id: InodeIdentifier {
                                 filesystem_id: FilesystemId::Proc,
@@ -158,8 +164,8 @@ impl ProcFilesystem {
                     name: "status".to_owned(),
                     file_type: FileType::Regular,
                 }];
-                let processes = sys::processes();
-                let pid_files: Vec<DirectoryEntry> = processes
+                let process_table_lock = lock_global_process_table();
+                let pid_files: Vec<DirectoryEntry> = process_table_lock
                     .iter()
                     .map(|proc| proc.pid)
                     .map(|pid| DirectoryEntry {
@@ -193,8 +199,8 @@ impl ProcFilesystem {
                 }
 
                 if let Ok(pid) = child_name.parse::<Pid>() {
-                    let mut processes = sys::processes();
-                    if processes.process(pid).is_some() {
+                    let mut process_table_lock = lock_global_process_table();
+                    if process_table_lock.process(pid).is_some() {
                         return Ok(InodeIdentifier {
                             filesystem_id: FilesystemId::Proc,
                             number: 1000 + pid,
@@ -217,8 +223,8 @@ impl ProcFilesystem {
         buf: &mut [u8],
         file_offset: usize,
     ) -> Result<usize> {
-        let mut processes = sys::processes();
-        let current_proc = processes.current();
+        let mut process_table_lock = lock_global_process_table();
+        let current_proc = process_table_lock.current();
         let content = self
             .file_contents
             .get(&(current_proc.pid, fd))

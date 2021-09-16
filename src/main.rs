@@ -9,7 +9,7 @@ use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::sys::{ProcessHandle, System};
+use crate::sys::{ProcessHandle, System, GLOBAL_PROCESS_TABLE};
 use crate::util::{FilePermissions, FileType};
 
 #[tokio::main]
@@ -20,8 +20,9 @@ pub async fn main() {
 
     let sys = System::new();
     let sys = Arc::new(Mutex::new(sys));
-    let init_handle = System::spawn_process(sys, "init".to_owned(), 0);
     {
+        let processes = GLOBAL_PROCESS_TABLE.lock().unwrap();
+        let init_handle = System::spawn_process(processes, sys, "init".to_owned(), 0);
         let liveness = Arc::clone(&liveness);
         tokio::task::spawn_blocking(move || run_init_proc(init_handle, liveness))
     };
@@ -29,8 +30,8 @@ pub async fn main() {
     loop {
         std::thread::sleep(Duration::from_millis(20));
         {
-            let mut processes = sys::processes();
-            if let Some(new_handle) = processes.spawned_but_not_yet_handled.pop_back() {
+            let mut spawn_queue = sys::GLOBAL_PROCESS_SPAWN_QUEUE.lock().unwrap();
+            if let Some(new_handle) = spawn_queue.pop_back() {
                 tokio::task::spawn_blocking(move || run_new_proc(new_handle));
             }
         }
@@ -54,35 +55,63 @@ fn run_init_proc(mut handle: ProcessHandle, liveness_checker: Arc<()>) {
         )
         .unwrap();
     handle
+        .sc_create("log", FileType::Regular, FilePermissions::ReadWrite)
+        .unwrap();
+    let log_fd = handle.sc_open("log").unwrap();
+
+    handle
         .sc_create("/bin/shell", FileType::Regular, FilePermissions::ReadOnly)
         .unwrap();
 
     handle
         .sc_spawn("/bin/shell")
         .expect("spawn shell from init");
+
     handle
         .sc_spawn("/bin/background")
         .expect("spawn background proc from init");
 
+    handle
+        .sc_write(log_fd, "Init starting...\n".as_bytes())
+        .unwrap();
     loop {
-        if handle.pending_kill_signal().is_some() {
-            //SIGKILL
-            break;
-        }
+        handle = match handle.handle_signals() {
+            Some(handle) => handle,
+            None => {
+                println!("WARN: Init process was killed");
+                return;
+            }
+        };
 
         let child_pid = handle
             .sc_spawn("/bin/script")
             .expect("spawn child from init");
-        handle.sc_wait_pid(child_pid).unwrap();
+        //TODO wait for other children too ('background' task for example)
+        let child_result = handle.sc_wait_pid(child_pid).unwrap();
+        handle
+            .sc_write(
+                log_fd,
+                format!("{}: {:?}\n", child_pid, child_result).as_bytes(),
+            )
+            .unwrap();
 
+        std::thread::sleep(Duration::from_secs(1));
         if Arc::strong_count(&liveness_checker) < 2 {
             break;
         }
     }
+    println!("Init process exiting.");
 }
 
 fn run_new_proc(mut handle: ProcessHandle) {
     let name = handle.process_name();
+
+    if let Err(err) = handle.sc_stat(&name) {
+        eprintln!("did not find {}: {}", name, err);
+        handle.sc_exit(1);
+        return;
+    }
+
     match name.as_ref() {
         "/bin/script" => run_script_proc(handle),
         "/bin/background" => run_background_proc(handle),
@@ -93,14 +122,16 @@ fn run_new_proc(mut handle: ProcessHandle) {
 
 fn run_script_proc(mut handle: ProcessHandle) {
     for _ in 0..5 {
-        if handle.pending_kill_signal().is_some() {
-            //SIGKILL
-            break;
-            // TODO: exit differently if we get killed than if we run to the end
-            // This matters for the parent process that is listening
-        }
+        handle = match handle.handle_signals() {
+            Some(handle) => handle,
+            None => {
+                return;
+            }
+        };
         std::thread::sleep(Duration::from_secs(1));
     }
+
+    handle.sc_exit(0);
 }
 
 fn run_background_proc(mut sys: ProcessHandle) {
@@ -117,10 +148,12 @@ fn run_background_proc(mut sys: ProcessHandle) {
     let fd = sys.sc_open("uptime").expect("Open uptime file");
     let mut secs = 0_u64;
     for _ in 0..50 {
-        if sys.pending_kill_signal().is_some() {
-            //SIGKILL
-            break;
-        }
+        sys = match sys.handle_signals() {
+            Some(sys) => sys,
+            None => {
+                return;
+            }
+        };
 
         std::thread::sleep(Duration::from_secs(1));
         secs += 1;

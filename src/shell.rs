@@ -67,6 +67,7 @@ fn _cat_file(path: &str, sys: &mut ProcessHandle) -> Result<()> {
     let fd = sys.sc_open(path)?;
     let mut buf = vec![0; 1024];
     loop {
+        //TODO if reading fails here, we leak the FD
         let n = sys.sc_read(fd, &mut buf)?;
         if n > 0 {
             let s = String::from_utf8_lossy(&buf[..n]);
@@ -136,7 +137,7 @@ fn cd(args: &[&str], sys: &mut ProcessHandle) -> Result<()> {
 
 fn rm(args: &[&str], sys: &mut ProcessHandle) -> Result<()> {
     let path = args.get(1).ok_or_else(|| "missing arg".to_owned())?;
-    sys.sc_remove(path)?;
+    sys.sc_unlink(path)?;
     println!("File removed");
     Ok(())
 }
