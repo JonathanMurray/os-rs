@@ -14,33 +14,24 @@ use crate::util::{FilePermissions, FileType};
 
 #[tokio::main]
 pub async fn main() {
-    println!("Welcome to the Operating System!");
+    println!("Operating System initializing...");
 
     let liveness = Arc::new(());
 
     let sys = System::new();
     let sys = Arc::new(Mutex::new(sys));
-    let _shell_task = {
-        let handle = System::spawn_process(sys.clone(), "shell".to_owned());
-        tokio::task::spawn_blocking(move || run_shell_proc(handle))
-    };
-    let _background_task = {
-        let handle = System::spawn_process(sys.clone(), "background".to_owned());
-        tokio::task::spawn_blocking(move || run_background_proc(handle))
-    };
-    let _idle_task = {
-        let handle = System::spawn_process(sys, "idle".to_owned());
-
+    let init_handle = System::spawn_process(sys, "init".to_owned(), 0);
+    {
         let liveness = Arc::clone(&liveness);
-        tokio::task::spawn_blocking(move || run_idle_proc(handle, liveness))
+        tokio::task::spawn_blocking(move || run_init_proc(init_handle, liveness))
     };
 
     loop {
-        std::thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(Duration::from_millis(20));
         {
             let mut processes = sys::processes();
             if let Some(new_handle) = processes.spawned_but_not_yet_handled.pop_back() {
-                tokio::task::spawn_blocking(move || run_script_proc(new_handle));
+                tokio::task::spawn_blocking(move || run_new_proc(new_handle));
             }
         }
     }
@@ -48,13 +39,59 @@ pub async fn main() {
     //futures::try_join!(shell_task, background_task, idle_task).expect("Kernel crashed");
 }
 
-fn run_script_proc(mut handle: ProcessHandle) {
+fn run_init_proc(mut handle: ProcessHandle, liveness_checker: Arc<()>) {
+    handle
+        .sc_create("/bin", FileType::Directory, FilePermissions::ReadOnly)
+        .unwrap();
+    handle
+        .sc_create("/bin/script", FileType::Regular, FilePermissions::ReadOnly)
+        .unwrap();
+    handle
+        .sc_create(
+            "/bin/background",
+            FileType::Regular,
+            FilePermissions::ReadOnly,
+        )
+        .unwrap();
+    handle
+        .sc_create("/bin/shell", FileType::Regular, FilePermissions::ReadOnly)
+        .unwrap();
+
+    handle
+        .sc_spawn("/bin/shell")
+        .expect("spawn shell from init");
+    handle
+        .sc_spawn("/bin/background")
+        .expect("spawn background proc from init");
+
+    loop {
+        if handle.pending_kill_signal().is_some() {
+            //SIGKILL
+            break;
+        }
+
+        let child_pid = handle
+            .sc_spawn("/bin/script")
+            .expect("spawn child from init");
+        handle.sc_wait_pid(child_pid).unwrap();
+
+        if Arc::strong_count(&liveness_checker) < 2 {
+            break;
+        }
+    }
+}
+
+fn run_new_proc(mut handle: ProcessHandle) {
     let name = handle.process_name();
     match name.as_ref() {
-        "/bin/script" => {}
+        "/bin/script" => run_script_proc(handle),
+        "/bin/background" => run_background_proc(handle),
+        "/bin/shell" => run_shell_proc(handle),
         _ => todo!("Handle bad script path"),
     }
+}
 
+fn run_script_proc(mut handle: ProcessHandle) {
     for _ in 0..5 {
         if handle.pending_kill_signal().is_some() {
             //SIGKILL
@@ -99,32 +136,8 @@ fn run_background_proc(mut sys: ProcessHandle) {
     sys.sc_close(fd).expect("Close uptime file");
 }
 
-fn run_idle_proc(mut handle: ProcessHandle, liveness_checker: Arc<()>) {
-    handle
-        .sc_create("/bin", FileType::Directory, FilePermissions::ReadOnly)
-        .unwrap();
-    handle
-        .sc_create("/bin/script", FileType::Regular, FilePermissions::ReadOnly)
-        .unwrap();
-
-    loop {
-        if handle.pending_kill_signal().is_some() {
-            //SIGKILL
-            break;
-        }
-
-        let child_pid = handle
-            .sc_spawn("/bin/script")
-            .expect("spawn child from init");
-        handle.sc_wait_pid(child_pid).unwrap();
-
-        if Arc::strong_count(&liveness_checker) < 2 {
-            break;
-        }
-    }
-}
-
 fn run_shell_proc(mut sys: ProcessHandle) {
+    println!("Welcome.");
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 

@@ -31,11 +31,12 @@ pub struct GlobalProcessTable {
 }
 
 impl GlobalProcessTable {
-    fn add(&mut self, process_name: String) -> Pid {
+    fn add(&mut self, process_name: String, parent_pid: Pid) -> Pid {
         let pid = self.next_pid;
         self.next_pid += 1;
-        let proc = Process {
+        let process = Process {
             pid,
+            parent_pid,
             name: process_name,
             open_files: Default::default(),
             next_fd: 0,
@@ -48,7 +49,7 @@ impl GlobalProcessTable {
 
         let pending_kill_signals = Default::default();
         let entry = ProcessTableEntry {
-            process: proc,
+            process,
             pending_kill_signals,
         };
 
@@ -110,6 +111,7 @@ struct ProcessTableEntry {
 #[derive(Debug)]
 pub struct Process {
     pub pid: Pid,
+    pub parent_pid: Pid,
     pub name: String,
     pub open_files: Vec<OpenFile>,
     next_fd: Fd,
@@ -152,8 +154,12 @@ impl System {
         }
     }
 
-    pub fn spawn_process(sys: Arc<Mutex<System>>, process_name: String) -> ProcessHandle {
-        let pid = processes().add(process_name);
+    pub fn spawn_process(
+        sys: Arc<Mutex<System>>,
+        process_name: String,
+        parent_pid: Pid,
+    ) -> ProcessHandle {
+        let pid = processes().add(process_name, parent_pid);
         ProcessHandle { sys, pid }
     }
 }
@@ -181,6 +187,7 @@ impl ProcessHandle {
         let path = path.into();
 
         let child_pid = {
+            let pid = self.pid;
             let mut active_handle = ActiveProcessHandle::new(self)?;
 
             let cwd = {
@@ -193,7 +200,7 @@ impl ProcessHandle {
             let _stat = active_handle.sys.vfs.stat_file(&path, cwd)?;
 
             let mut processes = processes();
-            processes.add(path)
+            processes.add(path, pid)
         };
 
         let child_handle = ProcessHandle {
@@ -492,7 +499,7 @@ mod tests {
 
     fn setup() -> ProcessHandle {
         let sys = System::new();
-        System::spawn_process(Arc::new(Mutex::new(sys)), "test".to_owned())
+        System::spawn_process(Arc::new(Mutex::new(sys)), "test".to_owned(), 0)
     }
 
     #[test]

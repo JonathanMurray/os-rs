@@ -42,7 +42,8 @@ impl ProcFilesystem {
                     } else {
                         content.push_str(&format!("  {}: {}\n", proc.pid, proc.name));
                     };
-                    content.push_str(&format!("    open files: {:?}\n", proc.open_files));
+                    content.push_str(&format!("      open files: {:?}\n", proc.open_files));
+                    content.push_str(&format!("      parent pid: {:?}\n", proc.parent_pid));
                 }
                 self.file_contents.insert((current_pid, fd), content);
                 Ok(())
