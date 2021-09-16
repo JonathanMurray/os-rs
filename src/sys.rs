@@ -45,6 +45,7 @@ impl GlobalProcessTable {
                 number: 0,
             }, //TODO don't rely on / having ino=0 everywhere
             log: vec![],
+            state: ProcessState::Running,
         };
 
         let pending_kill_signals = Default::default();
@@ -117,6 +118,7 @@ pub struct Process {
     next_fd: Fd,
     cwd: InodeIdentifier,
     pub log: Vec<String>,
+    pub state: ProcessState,
 }
 
 impl Process {
@@ -140,6 +142,12 @@ pub struct OpenFile {
     inode_id: InodeIdentifier,
     fd: Fd,
     offset: usize,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum ProcessState {
+    Running,
+    Waiting,
 }
 
 #[derive(Debug)]
@@ -221,10 +229,11 @@ impl ProcessHandle {
             let _active_context = ActiveProcessHandle::new(self)?;
             let mut processes = processes();
             let proc = processes.current();
+            proc.state = ProcessState::Waiting;
             proc.log.push(format!("wait_pid({})", pid));
         }
         loop {
-            std::thread::sleep(Duration::from_secs(1));
+            std::thread::sleep(Duration::from_millis(20));
 
             let _active_context = ActiveProcessHandle::new(self)?;
             let processes = processes();

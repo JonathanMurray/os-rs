@@ -137,7 +137,7 @@ fn run_background_proc(mut sys: ProcessHandle) {
 }
 
 fn run_shell_proc(mut sys: ProcessHandle) {
-    println!("Welcome.");
+    println!("Welcome!");
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 
