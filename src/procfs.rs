@@ -7,6 +7,7 @@ use crate::sys::{GlobalProcessTable, GLOBAL_PROCESS_TABLE};
 use crate::util::{
     DirectoryEntry, Fd, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier, Pid,
 };
+use crate::vfs::Filesystem;
 
 type Result<T> = core::result::Result<T, String>;
 
@@ -166,7 +167,7 @@ impl ProcFilesystem {
         match inode_number {
             0 => {
                 let mut listing = vec![DirectoryEntry {
-                    inode_number: 1,
+                    inode_id: InodeIdentifier::new(FilesystemId::Proc, 1),
                     name: "status".to_owned(),
                     file_type: FileType::Regular,
                 }];
@@ -175,7 +176,7 @@ impl ProcFilesystem {
                     .iter()
                     .map(|proc| proc.pid)
                     .map(|pid| DirectoryEntry {
-                        inode_number: 1000 + pid,
+                        inode_id: InodeIdentifier::new(FilesystemId::Proc, 1000 + pid),
                         name: format!("{}", pid),
                         file_type: FileType::Regular,
                     })
@@ -186,39 +187,6 @@ impl ProcFilesystem {
             _ => Err(format!(
                 "No directory on procfs with inode number: {}",
                 inode_number
-            )),
-        }
-    }
-
-    pub fn directory_child_id(
-        &mut self,
-        dir_inode_number: Ino,
-        child_name: &str,
-    ) -> Result<InodeIdentifier> {
-        match dir_inode_number {
-            0 => {
-                if child_name == "status" {
-                    return Ok(InodeIdentifier {
-                        filesystem_id: FilesystemId::Proc,
-                        number: 1,
-                    });
-                }
-
-                if let Ok(pid) = child_name.parse::<Pid>() {
-                    let mut process_table_lock = lock_global_process_table();
-                    if process_table_lock.process(pid).is_some() {
-                        return Ok(InodeIdentifier {
-                            filesystem_id: FilesystemId::Proc,
-                            number: 1000 + pid,
-                        });
-                    }
-                }
-
-                return Err(format!("Directory has no child with name: {}", child_name));
-            }
-            _ => Err(format!(
-                "No directory on procfs with inode number: {}",
-                dir_inode_number
             )),
         }
     }
@@ -234,10 +202,83 @@ impl ProcFilesystem {
         let content = self
             .file_contents
             .get(&(current_proc.pid, fd))
-            .ok_or("No such open proc file")?;
+            .ok_or_else(|| {
+                format!(
+                    "No open file on procfs with fd {} owned by pid {}",
+                    fd, current_proc.pid
+                )
+            })?;
         let mut cursor = Cursor::new(&content);
         cursor.set_position(file_offset as u64);
         let num_read = cursor.read(buf).expect("Failed to read from file");
         Ok(num_read)
+    }
+}
+
+impl Filesystem for ProcFilesystem {
+    fn create(
+        &mut self,
+        _parent_directory: InodeIdentifier,
+        _file_type: FileType,
+        _permissions: FilePermissions,
+    ) -> Result<Ino> {
+        Err("Can't create file on procfs".to_owned())
+    }
+
+    fn remove(&mut self, _inode_number: Ino) -> Result<()> {
+        Err("Can't remove file on procfs".to_owned())
+    }
+
+    fn inode(&self, inode_number: Ino) -> Result<Inode> {
+        self.inode(inode_number)
+    }
+
+    fn add_directory_entry(
+        &mut self,
+        _directory: Ino,
+        _name: String,
+        _child: InodeIdentifier,
+    ) -> Result<()> {
+        Err("Can't add directory entry on procfs".to_owned())
+    }
+
+    fn remove_directory_entry(&mut self, _directory: Ino, _child: InodeIdentifier) -> Result<()> {
+        Err("Can't remove directory entry on procfs".to_owned())
+    }
+
+    fn directory_entries(&mut self, directory: Ino) -> Result<Vec<DirectoryEntry>> {
+        self.list_directory(directory)
+    }
+
+    fn update_inode_parent(
+        &mut self,
+        _inode_number: Ino,
+        _new_parent: InodeIdentifier,
+    ) -> Result<()> {
+        panic!("We shouldn't get here? procfs update_inode_parent")
+    }
+
+    fn open(&mut self, inode_number: Ino, fd: Fd) -> Result<()> {
+        eprintln!("procfs open({}, {})", inode_number, fd);
+        self.open_file(inode_number, fd)
+    }
+
+    fn close(&mut self, fd: Fd) -> Result<()> {
+        eprintln!("procfs close({})", fd);
+        self.close_file(fd)
+    }
+
+    fn read(
+        &mut self,
+        _inode_number: Ino,
+        fd: Fd,
+        buf: &mut [u8],
+        file_offset: usize,
+    ) -> Result<usize> {
+        self.read_file_at_offset(fd, buf, file_offset)
+    }
+
+    fn write(&mut self, _inode_number: Ino, _buf: &[u8], _file_offset: usize) -> Result<usize> {
+        Err("Can't write to procfs".to_owned())
     }
 }

@@ -1,3 +1,4 @@
+mod devfs;
 mod procfs;
 mod regularfs;
 mod shell;
@@ -60,7 +61,7 @@ fn run_init_proc(mut handle: ProcessHandle, liveness_checker: Arc<()>) {
     handle
         .sc_create("log", FileType::Regular, FilePermissions::ReadWrite)
         .unwrap();
-    let log_fd = handle.sc_open("log").unwrap();
+    let log_fd = handle.sc_open("/dev/log").unwrap();
 
     handle
         .sc_create("/bin/shell", FileType::Regular, FilePermissions::ReadOnly)

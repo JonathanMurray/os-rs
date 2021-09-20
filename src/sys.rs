@@ -473,7 +473,7 @@ impl ProcessHandle {
         result
     }
 
-    pub fn sc_write(&mut self, fd: Fd, buf: &[u8]) -> Result<()> {
+    pub fn sc_write(&mut self, fd: Fd, buf: &[u8]) -> Result<usize> {
         //TODO permissions
 
         let mut active_context = ActiveProcessHandle::new(self);
@@ -493,11 +493,15 @@ impl ProcessHandle {
             .vfs
             .write_file_at_offset(inode_id, buf, offset)?;
 
+        //TODO some files are not seekable. Does it make sense
+        //that we're storing the offset here, then? Or is that
+        //something that the underlying FS should keep track of?
+
         let mut processes = active_context.process_table();
         let proc = processes.current();
         let mut open_file = proc.find_open_file_mut(fd)?;
         open_file.offset += num_written;
-        Ok(())
+        Ok(num_written)
     }
 
     pub fn sc_seek(&mut self, fd: Fd, offset: usize) -> Result<()> {

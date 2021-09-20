@@ -57,6 +57,7 @@ impl Shell {
         let file_type = match stat.file_type {
             FileType::Regular => "file",
             FileType::Directory => "directory",
+            FileType::CharacterDevice => "character device",
         }
         .to_owned();
         let permissions = match stat.permissions {

@@ -4,6 +4,7 @@ use std::io::{Cursor, Read};
 use crate::util::{
     DirectoryEntry, Fd, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier,
 };
+use crate::vfs::Filesystem;
 
 type Result<T> = core::result::Result<T, String>;
 
@@ -33,6 +34,7 @@ impl File {
                 content: FileContent::Regular(Default::default()),
                 fds: Default::default(),
             },
+            FileType::CharacterDevice => panic!("Cannot create character device on regular fs"),
         }
     }
 }
@@ -62,7 +64,7 @@ impl RegularFilesystem {
         }
     }
 
-    pub fn create_inode(
+    fn create_inode(
         &mut self,
         file_type: FileType,
         permissions: FilePermissions,
@@ -86,11 +88,12 @@ impl RegularFilesystem {
         inode_number
     }
 
-    pub fn remove_inode(&mut self, inode_number: Ino) {
+    fn remove_inode(&mut self, inode_number: Ino) -> Result<()> {
         //TODO remove directory / regular file
         //TODO if someone has an open file, don't delete it in such a way that
         // read/writes start failing for that process
         self.inodes.retain(|inode| inode.id.number != inode_number);
+        Ok(())
     }
 
     fn directory_mut(&mut self, inode_number: Ino) -> Result<&mut Directory> {
@@ -113,7 +116,7 @@ impl RegularFilesystem {
         }
     }
 
-    pub fn add_child_to_directory(
+    fn add_child_to_directory(
         &mut self,
         dir_inode_number: Ino,
         name: String,
@@ -124,7 +127,7 @@ impl RegularFilesystem {
         Ok(())
     }
 
-    pub fn remove_child_from_directory(
+    fn remove_child_from_directory(
         &mut self,
         dir_inode_number: Ino,
         child_inode_id: InodeIdentifier,
@@ -134,7 +137,7 @@ impl RegularFilesystem {
         Ok(())
     }
 
-    pub fn set_inode_parent(
+    fn set_inode_parent(
         &mut self,
         inode_number: Ino,
         new_parent_id: InodeIdentifier,
@@ -143,13 +146,13 @@ impl RegularFilesystem {
         Ok(())
     }
 
-    pub fn list_directory(&mut self, inode_number: Ino) -> Result<Vec<DirectoryEntry>> {
+    fn list_directory(&mut self, inode_number: Ino) -> Result<Vec<DirectoryEntry>> {
         let dir = self.directory(inode_number)?;
         let listing = dir
             .iter()
             .map(|(name, id)| {
                 DirectoryEntry {
-                    inode_number: id.number,
+                    inode_id: *id,
                     name: name.clone(),
                     file_type: FileType::Regular, //TODO
                 }
@@ -158,34 +161,7 @@ impl RegularFilesystem {
         Ok(listing)
     }
 
-    pub fn directory_child_name(
-        &self,
-        dir_inode_number: Ino,
-        child_inode_id: InodeIdentifier,
-    ) -> Result<String> {
-        let dir = self.directory(dir_inode_number)?;
-        match dir
-            .iter()
-            .find(|(_name, child_id)| **child_id == child_inode_id)
-        {
-            Some(child) => Ok(child.0.clone()),
-            None => Err(format!("No child with inode id: {:?}", child_inode_id)),
-        }
-    }
-
-    pub fn directory_child_id(
-        &mut self,
-        dir_inode_number: Ino,
-        child_name: &str,
-    ) -> Result<InodeIdentifier> {
-        let dir = self.directory(dir_inode_number)?;
-        let child_id = dir
-            .get(child_name)
-            .ok_or_else(|| format!("No child with name: {}", child_name))?;
-        Ok(*child_id)
-    }
-
-    pub fn open_file(&mut self, inode_number: Ino, fd: Fd) -> Result<()> {
+    fn open_file(&mut self, inode_number: Ino, fd: Fd) -> Result<()> {
         let file = self
             .files
             .get_mut(&inode_number)
@@ -202,7 +178,7 @@ impl RegularFilesystem {
         Ok(())
     }
 
-    pub fn close_file(&mut self, fd: Fd) -> Result<()> {
+    fn close_file(&mut self, fd: Fd) -> Result<()> {
         for file in self.files.values_mut() {
             file.fds.retain(|open_fd| *open_fd != fd);
         }
@@ -211,7 +187,7 @@ impl RegularFilesystem {
         Ok(())
     }
 
-    pub fn read_file_at_offset(
+    fn read_file_at_offset(
         &mut self,
         inode_number: Ino,
         buf: &mut [u8],
@@ -229,7 +205,7 @@ impl RegularFilesystem {
         }
     }
 
-    pub fn write_file_at_offset(
+    fn write_file_at_offset(
         &mut self,
         inode_number: Ino,
         buf: &[u8],
@@ -272,12 +248,78 @@ impl RegularFilesystem {
             .ok_or_else(|| format!("No inode with number: {}", inode_number))
     }
 
-    pub fn inode(&self, inode_number: Ino) -> Result<Inode> {
+    fn inode(&self, inode_number: Ino) -> Result<Inode> {
         let inode = *self
             .inodes
             .iter()
             .find(|inode| inode.id.number == inode_number)
             .ok_or_else(|| format!("No inode with number: {}", inode_number))?;
         Ok(inode)
+    }
+}
+
+impl Filesystem for RegularFilesystem {
+    fn create(
+        &mut self,
+        parent_directory: InodeIdentifier,
+        file_type: FileType,
+        permissions: FilePermissions,
+    ) -> Result<Ino> {
+        Ok(self.create_inode(file_type, permissions, parent_directory))
+    }
+
+    fn remove(&mut self, inode_number: Ino) -> Result<()> {
+        self.remove_inode(inode_number)
+    }
+
+    fn inode(&self, inode_number: Ino) -> Result<Inode> {
+        self.inode(inode_number)
+    }
+
+    fn add_directory_entry(
+        &mut self,
+        directory: Ino,
+        name: String,
+        child: InodeIdentifier,
+    ) -> Result<()> {
+        self.add_child_to_directory(directory, name, child)
+    }
+
+    fn remove_directory_entry(&mut self, directory: Ino, child: InodeIdentifier) -> Result<()> {
+        self.remove_child_from_directory(directory, child)
+    }
+
+    fn directory_entries(&mut self, directory: Ino) -> Result<Vec<DirectoryEntry>> {
+        self.list_directory(directory)
+    }
+
+    fn update_inode_parent(
+        &mut self,
+        inode_number: Ino,
+        new_parent: InodeIdentifier,
+    ) -> Result<()> {
+        self.set_inode_parent(inode_number, new_parent)
+    }
+
+    fn open(&mut self, inode_number: Ino, fd: Fd) -> Result<()> {
+        self.open_file(inode_number, fd)
+    }
+
+    fn close(&mut self, fd: Fd) -> Result<()> {
+        self.close_file(fd)
+    }
+
+    fn read(
+        &mut self,
+        inode_number: Ino,
+        _fd: Fd,
+        buf: &mut [u8],
+        file_offset: usize,
+    ) -> Result<usize> {
+        self.read_file_at_offset(inode_number, buf, file_offset)
+    }
+
+    fn write(&mut self, inode_number: Ino, buf: &[u8], file_offset: usize) -> Result<usize> {
+        self.write_file_at_offset(inode_number, buf, file_offset)
     }
 }

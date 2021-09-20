@@ -11,6 +11,7 @@ pub type Pid = u32;
 pub enum FileType {
     Regular,
     Directory,
+    CharacterDevice,
 }
 
 #[derive(PartialEq, Debug, Copy, Clone)]
@@ -29,15 +30,16 @@ pub struct FileStat {
 
 #[derive(PartialEq, Debug)]
 pub struct DirectoryEntry {
-    pub inode_number: Ino,
+    pub inode_id: InodeIdentifier,
     pub name: String,
     pub file_type: FileType,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Hash, std::cmp::Eq)]
 pub enum FilesystemId {
     Main,
     Proc,
+    Dev,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -59,4 +61,13 @@ impl Inode {
 pub struct InodeIdentifier {
     pub filesystem_id: FilesystemId,
     pub number: Ino,
+}
+
+impl InodeIdentifier {
+    pub fn new(filesystem_id: FilesystemId, number: Ino) -> Self {
+        Self {
+            filesystem_id,
+            number,
+        }
+    }
 }
