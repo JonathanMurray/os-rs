@@ -42,16 +42,22 @@ impl ProcFilesystem {
                 let process_table_lock = lock_global_process_table();
                 let current_pid = process_table_lock.current_pid();
                 content.push_str(&format!("{} processes:\n", process_table_lock.count()));
+                let mut lines = Vec::new();
                 for proc in process_table_lock.iter() {
-                    if current_pid == proc.pid {
-                        content.push_str(&format!("* {}: {}\n", proc.pid, proc.name));
-                    } else {
-                        content.push_str(&format!("  {}: {}\n", proc.pid, proc.name));
-                    };
-
-                    content.push_str(&format!("      {:?}\n", proc.state));
-                    content.push_str(&format!("      open files: {:?}\n", proc.open_files));
-                    content.push_str(&format!("      parent pid: {:?}\n", proc.parent_pid));
+                    let line = format!(
+                        "{} {} {} {:?} {} {:?}\n",
+                        proc.pid,
+                        proc.parent_pid,
+                        proc.name,
+                        proc.state,
+                        proc.open_files.len(),
+                        proc.open_files
+                    );
+                    lines.push((proc.pid, line));
+                }
+                lines.sort_by_key(|pair| pair.0);
+                for line in lines.into_iter().map(|pair| pair.1) {
+                    content.push_str(&line);
                 }
                 self.file_contents.insert((current_pid, fd), content);
                 Ok(())

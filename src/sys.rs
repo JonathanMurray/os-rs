@@ -51,12 +51,18 @@ impl GlobalProcessTable {
         self.processes.get_mut(&pid)
     }
 
+    fn children_mut(&mut self, parent_pid: Pid) -> impl Iterator<Item = &mut Process> {
+        self.processes
+            .values_mut()
+            .filter(move |p| p.parent_pid == parent_pid)
+    }
+
     pub fn current_pid(&self) -> Pid {
-        self.currently_running_pid.unwrap()
+        self.currently_running_pid.expect("No current pid")
     }
 
     pub fn current(&mut self) -> &mut Process {
-        let pid = self.currently_running_pid.unwrap();
+        let pid = self.currently_running_pid.expect("No current pid");
         self.processes.get_mut(&pid).unwrap()
     }
 
@@ -69,7 +75,7 @@ impl GlobalProcessTable {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum ProcessResult {
     ExitCode(u32),
     Killed,
@@ -286,27 +292,56 @@ impl ProcessHandle {
         close_zombies_files(active_handle, self_pid);
     }
 
-    pub fn sc_wait_pid(&mut self, pid: Pid) -> Result<ProcessResult> {
+    pub fn sc_wait_pid(
+        &mut self,
+        target: WaitPidTarget,
+        options: WaitPidOptions,
+    ) -> Result<Option<(Pid, ProcessResult)>> {
         let self_pid = self.pid;
         {
             let active_context = ActiveProcessHandle::new(self);
             let mut processes = active_context.process_table();
             let proc = processes.current();
             proc.state = ProcessState::Waiting;
-            proc.log.push(format!("wait_pid({})", pid));
+            proc.log.push(format!("wait_pid({:?})", target));
         }
         //Release all locks before sleeping
         loop {
+            //TODO: Don't busy-wait. Yield control to scheduler somehow.
             std::thread::sleep(Duration::from_millis(20));
 
             let active_context = ActiveProcessHandle::new(self);
             let mut processes = active_context.process_table();
-            let child = processes.process(pid).expect("Child process must exist");
-            if let Some(result) = child.result.take() {
-                eprintln!("{} will reap {}", self_pid, pid);
-                processes.remove(pid);
-                return Ok(result);
+            let child_and_result = match target {
+                WaitPidTarget::Pid(pid) => {
+                    let child = processes.process(pid).expect("Child process must exist");
+                    child.result.take().map(|result| (pid, result))
+                }
+                WaitPidTarget::AnyChild => {
+                    let mut children = processes.children_mut(self_pid);
+                    loop {
+                        match children.next() {
+                            Some(child) => {
+                                if let Some(result) = child.result.take() {
+                                    eprintln!("{} will reap {}", self_pid, child.pid);
+                                    break Some((child.pid, result));
+                                }
+                            }
+                            None => {
+                                break None;
+                            }
+                        }
+                    }
+                }
             };
+            if let Some((child_pid, child_result)) = child_and_result {
+                processes.remove(child_pid);
+                processes.current().state = ProcessState::Running;
+                return Ok(Some((child_pid, child_result)));
+            } else if options == WaitPidOptions::NoHang {
+                processes.current().state = ProcessState::Running;
+                return Ok(None);
+            }
         }
     }
 
@@ -558,6 +593,18 @@ impl Drop for ProcessHandle {
             eprintln!("Process has already been reaped");
         }
     }
+}
+
+#[derive(Debug)]
+pub enum WaitPidTarget {
+    Pid(Pid),
+    AnyChild,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum WaitPidOptions {
+    Default,
+    NoHang,
 }
 
 struct ActiveProcessHandle<'a> {

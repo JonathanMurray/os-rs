@@ -9,7 +9,8 @@ use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::sys::{ProcessHandle, System, GLOBAL_PROCESS_TABLE};
+use crate::shell::Shell;
+use crate::sys::{ProcessHandle, System, WaitPidOptions, WaitPidTarget, GLOBAL_PROCESS_TABLE};
 use crate::util::{FilePermissions, FileType};
 
 #[tokio::main]
@@ -36,8 +37,6 @@ pub async fn main() {
             }
         }
     }
-
-    //futures::try_join!(shell_task, background_task, idle_task).expect("Kernel crashed");
 }
 
 fn run_init_proc(mut handle: ProcessHandle, liveness_checker: Arc<()>) {
@@ -47,6 +46,10 @@ fn run_init_proc(mut handle: ProcessHandle, liveness_checker: Arc<()>) {
     handle
         .sc_create("/bin/script", FileType::Regular, FilePermissions::ReadOnly)
         .unwrap();
+    handle
+        .sc_create("/bin/sleep", FileType::Regular, FilePermissions::ReadOnly)
+        .unwrap();
+
     handle
         .sc_create(
             "/bin/background",
@@ -87,7 +90,10 @@ fn run_init_proc(mut handle: ProcessHandle, liveness_checker: Arc<()>) {
             .sc_spawn("/bin/script")
             .expect("spawn child from init");
         //TODO wait for other children too ('background' task for example)
-        let child_result = handle.sc_wait_pid(child_pid).unwrap();
+        let child_result = handle
+            .sc_wait_pid(WaitPidTarget::AnyChild, WaitPidOptions::Default)
+            .unwrap();
+        eprintln!("child wait result: {:?}", child_result);
         handle
             .sc_write(
                 log_fd,
@@ -116,8 +122,29 @@ fn run_new_proc(mut handle: ProcessHandle) {
         "/bin/script" => run_script_proc(handle),
         "/bin/background" => run_background_proc(handle),
         "/bin/shell" => run_shell_proc(handle),
-        _ => todo!("Handle bad script path"),
+        "/bin/sleep" => run_sleep_proc(handle),
+        _ => {
+            eprintln!("Not a valid executable: {}", name);
+            handle.sc_exit(2);
+        }
     }
+}
+
+fn run_sleep_proc(mut handle: ProcessHandle) {
+    for _ in 0..5 {
+        handle = match handle.handle_signals() {
+            Some(handle) => handle,
+            None => {
+                return;
+            }
+        };
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    //TODO Don't print directly. Introduce stdout as a proper concept.
+    println!("Woke up after sleeping.");
+
+    handle.sc_exit(0);
 }
 
 fn run_script_proc(mut handle: ProcessHandle) {
@@ -173,13 +200,13 @@ fn run_shell_proc(mut sys: ProcessHandle) {
     println!("Welcome!");
     let stdin = io::stdin();
     let mut stdout = io::stdout();
-
+    let mut sh = Shell::new();
     loop {
         let current_dir_name = sys.sc_get_current_dir_name().expect("Must have valid cwd");
         print!("{}$ ", current_dir_name.as_str());
         stdout.flush().unwrap();
         let mut input = String::new();
         stdin.read_line(&mut input).unwrap();
-        shell::handle(&mut sys, input);
+        sh.handle(&mut sys, input);
     }
 }
