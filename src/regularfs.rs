@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::io::{Cursor, Read};
 
 use crate::util::{
-    DirectoryEntry, Fd, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier,
+    DirectoryEntry, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier,
+    OpenFileId,
 };
 use crate::vfs::Filesystem;
 
@@ -20,7 +21,7 @@ enum FileContent {
 #[derive(Debug)]
 struct File {
     content: FileContent,
-    fds: Vec<Fd>,
+    open_ids: Vec<OpenFileId>,
 }
 
 impl File {
@@ -28,11 +29,11 @@ impl File {
         match file_type {
             FileType::Directory => Self {
                 content: FileContent::Dir(Default::default()),
-                fds: Default::default(),
+                open_ids: Default::default(),
             },
             FileType::Regular => Self {
                 content: FileContent::Regular(Default::default()),
-                fds: Default::default(),
+                open_ids: Default::default(),
             },
             FileType::CharacterDevice => panic!("Cannot create character device on regular fs"),
         }
@@ -54,7 +55,7 @@ impl RegularFilesystem {
             root_inode.id.number,
             File {
                 content: FileContent::Dir(Default::default()),
-                fds: Default::default(),
+                open_ids: Default::default(),
             },
         );
         Self {
@@ -161,29 +162,33 @@ impl RegularFilesystem {
         Ok(listing)
     }
 
-    fn open_file(&mut self, inode_number: Ino, fd: Fd) -> Result<()> {
+    fn open_file(&mut self, inode_number: Ino, id: OpenFileId) -> Result<()> {
         let file = self
             .files
             .get_mut(&inode_number)
             .ok_or_else(|| "No such file".to_owned())?;
 
+        //TODO this is broken. Two processes can open a file with
+        //identical id numbers. Maybe the 'id' concept shouldn't
+        //reach this far down, and we're lacking a 'File' concept
+        //on the VFS level.
         assert!(
-            !file.fds.contains(&fd),
-            "{} is already opened with fd {}",
+            !file.open_ids.contains(&id),
+            "{} is already opened with id {:?}",
             inode_number,
-            fd
+            id
         );
-        file.fds.push(fd);
-        eprintln!("Opened inode {} with fd {}", inode_number, fd);
+        file.open_ids.push(id);
+        eprintln!("Opened inode {} with id {:?}", inode_number, id);
         Ok(())
     }
 
-    fn close_file(&mut self, fd: Fd) -> Result<()> {
+    fn close_file(&mut self, id: OpenFileId) -> Result<()> {
         for file in self.files.values_mut() {
-            file.fds.retain(|open_fd| *open_fd != fd);
+            file.open_ids.retain(|open_id| *open_id != id);
         }
 
-        eprintln!("Closed fd {}", fd);
+        eprintln!("Closed id {:?}", id);
         Ok(())
     }
 
@@ -301,18 +306,18 @@ impl Filesystem for RegularFilesystem {
         self.set_inode_parent(inode_number, new_parent)
     }
 
-    fn open(&mut self, inode_number: Ino, fd: Fd) -> Result<()> {
-        self.open_file(inode_number, fd)
+    fn open(&mut self, inode_number: Ino, id: OpenFileId) -> Result<()> {
+        self.open_file(inode_number, id)
     }
 
-    fn close(&mut self, fd: Fd) -> Result<()> {
-        self.close_file(fd)
+    fn close(&mut self, id: OpenFileId) -> Result<()> {
+        self.close_file(id)
     }
 
     fn read(
         &mut self,
         inode_number: Ino,
-        _fd: Fd,
+        _id: OpenFileId,
         buf: &mut [u8],
         file_offset: usize,
     ) -> Result<usize> {

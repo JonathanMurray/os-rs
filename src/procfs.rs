@@ -5,7 +5,8 @@ use std::time::Instant;
 
 use crate::sys::{GlobalProcessTable, GLOBAL_PROCESS_TABLE};
 use crate::util::{
-    DirectoryEntry, Fd, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier, Pid,
+    DirectoryEntry, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier,
+    OpenFileId, Pid,
 };
 use crate::vfs::Filesystem;
 
@@ -20,8 +21,9 @@ fn lock_global_process_table() -> MutexGuard<'static, GlobalProcessTable> {
 pub struct ProcFilesystem {
     parent_inode_id: InodeIdentifier,
     startup_time: Instant,
-    file_contents: HashMap<(Pid, Fd), String>,
-    open_directories: HashSet<(Pid, Fd)>,
+    //TODO unify handling of files/directories ==> clearer error handling
+    file_contents: HashMap<OpenFileId, String>,
+    open_directories: HashSet<OpenFileId>,
 }
 
 impl ProcFilesystem {
@@ -34,21 +36,20 @@ impl ProcFilesystem {
         }
     }
 
-    pub fn open_file(&mut self, inode_number: Ino, fd: Fd) -> Result<()> {
+    pub fn open_file(&mut self, inode_number: Ino, open_file_id: OpenFileId) -> Result<()> {
         match inode_number {
             1 => {
                 let mut content = String::new();
                 let uptime = Instant::now().duration_since(self.startup_time);
                 content.push_str(&format!("uptime: {:.2}\n", uptime.as_secs_f32()));
                 let process_table_lock = lock_global_process_table();
-                let current_pid = process_table_lock.current_pid();
                 content.push_str(&format!("{} processes:\n", process_table_lock.count()));
                 let mut lines = Vec::new();
                 for proc in process_table_lock.iter() {
                     let line = format!(
                         "{} {} {} {:?} {} {:?}\n",
-                        proc.pid,
-                        proc.parent_pid,
+                        proc.pid.0,
+                        proc.parent_pid.0,
                         proc.name,
                         proc.state,
                         proc.open_files.len(),
@@ -56,23 +57,21 @@ impl ProcFilesystem {
                     );
                     lines.push((proc.pid, line));
                 }
-                lines.sort_by_key(|pair| pair.0);
+                lines.sort_by_key(|pair| pair.0 .0);
                 for line in lines.into_iter().map(|pair| pair.1) {
                     content.push_str(&line);
                 }
-                self.file_contents.insert((current_pid, fd), content);
+                self.file_contents.insert(open_file_id, content);
                 Ok(())
             }
             0 => {
-                let process_table_lock = lock_global_process_table();
-                let current_pid = process_table_lock.current_pid();
-                self.open_directories.insert((current_pid, fd));
+                self.open_directories.insert(open_file_id);
                 Ok(())
             }
             _ => {
                 if inode_number >= 1000 {
                     let mut process_table_lock = lock_global_process_table();
-                    let pid = inode_number - 1000;
+                    let pid = Pid(inode_number - 1000);
 
                     if let Some(proc) = process_table_lock.process(pid) {
                         let mut content = String::new();
@@ -81,11 +80,10 @@ impl ProcFilesystem {
                             content.push_str(log_line);
                             content.push('\n');
                         }
-                        let current_pid = process_table_lock.current().pid;
-                        self.file_contents.insert((current_pid, fd), content);
+                        self.file_contents.insert(open_file_id, content);
                         return Ok(());
                     } else {
-                        println!("DEBUG: No process with pid: {}", pid);
+                        println!("DEBUG: No process with pid: {:?}", pid);
                     }
                 }
 
@@ -97,12 +95,10 @@ impl ProcFilesystem {
         }
     }
 
-    pub fn close_file(&mut self, fd: Fd) -> Result<()> {
-        let mut process_table_lock = lock_global_process_table();
-        let proc = process_table_lock.current();
-        let closed_regular_file = self.file_contents.remove(&(proc.pid, fd)).is_some();
-        if !closed_regular_file && !self.open_directories.remove(&(proc.pid, fd)) {
-            return Err(format!("No file with fd: {}", fd));
+    pub fn close_file(&mut self, open_file_id: OpenFileId) -> Result<()> {
+        let closed_regular_file = self.file_contents.remove(&open_file_id).is_some();
+        if !closed_regular_file && !self.open_directories.remove(&open_file_id) {
+            return Err(format!("No open file with id: {:?}", open_file_id));
         }
 
         Ok(())
@@ -136,7 +132,7 @@ impl ProcFilesystem {
             _ => {
                 if inode_number >= 1000 {
                     let mut process_table_lock = lock_global_process_table();
-                    let pid = inode_number - 1000;
+                    let pid = Pid(inode_number - 1000);
 
                     if process_table_lock.process(pid).is_some() {
                         return Ok(Inode {
@@ -176,8 +172,8 @@ impl ProcFilesystem {
                     .iter()
                     .map(|proc| proc.pid)
                     .map(|pid| DirectoryEntry {
-                        inode_id: InodeIdentifier::new(FilesystemId::Proc, 1000 + pid),
-                        name: format!("{}", pid),
+                        inode_id: InodeIdentifier::new(FilesystemId::Proc, 1000 + pid.0),
+                        name: format!("{}", pid.0),
                         file_type: FileType::Regular,
                     })
                     .collect();
@@ -193,21 +189,17 @@ impl ProcFilesystem {
 
     pub fn read_file_at_offset(
         &mut self,
-        fd: Fd,
+        open_file_id: OpenFileId,
         buf: &mut [u8],
         file_offset: usize,
     ) -> Result<usize> {
-        let mut process_table_lock = lock_global_process_table();
-        let current_proc = process_table_lock.current();
+        if self.open_directories.contains(&open_file_id) {
+            return Err("Cannot read directory".to_owned());
+        }
         let content = self
             .file_contents
-            .get(&(current_proc.pid, fd))
-            .ok_or_else(|| {
-                format!(
-                    "No open file on procfs with fd {} owned by pid {}",
-                    fd, current_proc.pid
-                )
-            })?;
+            .get(&open_file_id)
+            .ok_or_else(|| format!("No open file on procfs with id {:?}", open_file_id))?;
         let mut cursor = Cursor::new(&content);
         cursor.set_position(file_offset as u64);
         let num_read = cursor.read(buf).expect("Failed to read from file");
@@ -258,24 +250,24 @@ impl Filesystem for ProcFilesystem {
         panic!("We shouldn't get here? procfs update_inode_parent")
     }
 
-    fn open(&mut self, inode_number: Ino, fd: Fd) -> Result<()> {
-        eprintln!("procfs open({}, {})", inode_number, fd);
-        self.open_file(inode_number, fd)
+    fn open(&mut self, inode_number: Ino, open_file_id: OpenFileId) -> Result<()> {
+        eprintln!("procfs open({}, {:?})", inode_number, open_file_id);
+        self.open_file(inode_number, open_file_id)
     }
 
-    fn close(&mut self, fd: Fd) -> Result<()> {
-        eprintln!("procfs close({})", fd);
-        self.close_file(fd)
+    fn close(&mut self, id: OpenFileId) -> Result<()> {
+        eprintln!("procfs close({:?})", id);
+        self.close_file(id)
     }
 
     fn read(
         &mut self,
         _inode_number: Ino,
-        fd: Fd,
+        id: OpenFileId,
         buf: &mut [u8],
         file_offset: usize,
     ) -> Result<usize> {
-        self.read_file_at_offset(fd, buf, file_offset)
+        self.read_file_at_offset(id, buf, file_offset)
     }
 
     fn write(&mut self, _inode_number: Ino, _buf: &[u8], _file_offset: usize) -> Result<usize> {

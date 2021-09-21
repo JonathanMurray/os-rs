@@ -11,12 +11,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::shell::Shell;
-use crate::sys::{ProcessHandle, System, WaitPidOptions, WaitPidTarget, GLOBAL_PROCESS_TABLE};
-use crate::util::{FilePermissions, FileType};
+use crate::sys::{
+    ProcessHandle, SpawnStdout, System, WaitPidOptions, WaitPidTarget, GLOBAL_PROCESS_TABLE,
+};
+use crate::util::{FilePermissions, FileType, Pid};
 
 #[tokio::main]
 pub async fn main() {
     println!("Operating System initializing...");
+
+    eprintln!("--------------------------------");
 
     let liveness = Arc::new(());
 
@@ -24,7 +28,7 @@ pub async fn main() {
     let sys = Arc::new(Mutex::new(sys));
     {
         let processes = GLOBAL_PROCESS_TABLE.lock().unwrap();
-        let init_handle = System::spawn_process(processes, sys, "init".to_owned(), 0);
+        let init_handle = System::spawn_process(processes, sys, "init".to_owned(), Pid(0), None);
         let liveness = Arc::clone(&liveness);
         tokio::task::spawn_blocking(move || run_init_proc(init_handle, liveness))
     };
@@ -41,6 +45,9 @@ pub async fn main() {
 }
 
 fn run_init_proc(mut handle: ProcessHandle, liveness_checker: Arc<()>) {
+    // Make init's stdout point at /dev/null. It must be the first file we open
+    handle.sc_open("/dev/null").expect("/dev/null must exist");
+
     handle
         .sc_create("/bin", FileType::Directory, FilePermissions::ReadOnly)
         .unwrap();
@@ -58,21 +65,22 @@ fn run_init_proc(mut handle: ProcessHandle, liveness_checker: Arc<()>) {
             FilePermissions::ReadOnly,
         )
         .unwrap();
-    handle
-        .sc_create("log", FileType::Regular, FilePermissions::ReadWrite)
-        .unwrap();
     let log_fd = handle.sc_open("/dev/log").unwrap();
+    eprintln!("Opened /dev/log with fd: {}", log_fd);
 
     handle
         .sc_create("/bin/shell", FileType::Regular, FilePermissions::ReadOnly)
         .unwrap();
 
+    let shell_stdout = handle
+        .sc_open("/dev/output")
+        .expect("/dev/output must exist to be used as shell stdout");
     handle
-        .sc_spawn("/bin/shell")
+        .sc_spawn("/bin/shell", SpawnStdout::OpenFile(shell_stdout))
         .expect("spawn shell from init");
 
     handle
-        .sc_spawn("/bin/background")
+        .sc_spawn("/bin/background", SpawnStdout::Inherit)
         .expect("spawn background proc from init");
 
     handle
@@ -87,22 +95,23 @@ fn run_init_proc(mut handle: ProcessHandle, liveness_checker: Arc<()>) {
             }
         };
 
-        let child_pid = handle
-            .sc_spawn("/bin/script")
+        handle
+            .sc_spawn("/bin/script", SpawnStdout::Inherit)
             .expect("spawn child from init");
-        //TODO wait for other children too ('background' task for example)
         let child_result = handle
             .sc_wait_pid(WaitPidTarget::AnyChild, WaitPidOptions::Default)
             .unwrap();
-        eprintln!("child wait result: {:?}", child_result);
         handle
-            .sc_write(
-                log_fd,
-                format!("{}: {:?}\n", child_pid, child_result).as_bytes(),
-            )
+            .sc_write(log_fd, format!("{:?}\n", child_result).as_bytes())
             .unwrap();
 
-        std::thread::sleep(Duration::from_secs(1));
+        let sleep_pid = handle
+            .sc_spawn("/bin/sleep", SpawnStdout::Inherit)
+            .expect("spawn sleep from init");
+        handle
+            .sc_wait_pid(WaitPidTarget::Pid(sleep_pid), WaitPidOptions::Default)
+            .unwrap();
+
         if Arc::strong_count(&liveness_checker) < 2 {
             break;
         }
@@ -133,28 +142,28 @@ fn run_new_proc(mut handle: ProcessHandle) {
 
 fn run_sleep_proc(mut handle: ProcessHandle) {
     for _ in 0..5 {
-        handle = match handle.handle_signals() {
-            Some(handle) => handle,
-            None => {
-                return;
-            }
+        handle = if let Some(h) = handle.handle_signals() {
+            h
+        } else {
+            return;
         };
+
         std::thread::sleep(Duration::from_millis(500));
     }
 
-    //TODO Don't print directly. Introduce stdout as a proper concept.
-    println!("Woke up after sleeping.");
+    handle
+        .sc_write(1, "Woke up".as_bytes())
+        .expect("writing to stdout");
 
     handle.sc_exit(0);
 }
 
 fn run_script_proc(mut handle: ProcessHandle) {
     for _ in 0..5 {
-        handle = match handle.handle_signals() {
-            Some(handle) => handle,
-            None => {
-                return;
-            }
+        handle = if let Some(h) = handle.handle_signals() {
+            h
+        } else {
+            return;
         };
         std::thread::sleep(Duration::from_secs(1));
     }
@@ -174,13 +183,13 @@ fn run_background_proc(mut sys: ProcessHandle) {
     sys.sc_create("uptime", FileType::Regular, FilePermissions::ReadWrite)
         .expect("Create uptime file");
     let fd = sys.sc_open("uptime").expect("Open uptime file");
+    eprintln!("background proc opened uptime file with fd: {}", fd);
     let mut secs = 0_u64;
     for _ in 0..50 {
-        sys = match sys.handle_signals() {
-            Some(sys) => sys,
-            None => {
-                return;
-            }
+        sys = if let Some(h) = sys.handle_signals() {
+            h
+        } else {
+            return;
         };
 
         std::thread::sleep(Duration::from_secs(1));

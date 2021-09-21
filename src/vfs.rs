@@ -2,10 +2,10 @@ use crate::devfs::DevFilesystem;
 use crate::procfs::ProcFilesystem;
 use crate::regularfs::RegularFilesystem;
 use crate::util::{
-    DirectoryEntry, Fd, FilePermissions, FileStat, FileType, FilesystemId, Ino, Inode,
-    InodeIdentifier,
+    DirectoryEntry, FilePermissions, FileStat, FileType, FilesystemId, Ino, Inode, InodeIdentifier,
+    OpenFileId, Pid,
 };
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
 
 type Result<T> = core::result::Result<T, String>;
 
@@ -35,14 +35,14 @@ pub trait Filesystem: std::fmt::Debug + Send {
     fn update_inode_parent(&mut self, inode_number: Ino, new_parent: InodeIdentifier)
         -> Result<()>;
 
-    fn open(&mut self, inode_number: Ino, fd: Fd) -> Result<()>;
+    fn open(&mut self, inode_number: Ino, id: OpenFileId) -> Result<()>;
 
-    fn close(&mut self, fd: Fd) -> Result<()>;
+    fn close(&mut self, id: OpenFileId) -> Result<()>;
 
     fn read(
         &mut self,
         inode_number: Ino,
-        fd: Fd,
+        id: OpenFileId,
         buf: &mut [u8],
         file_offset: usize,
     ) -> Result<usize>;
@@ -51,8 +51,17 @@ pub trait Filesystem: std::fmt::Debug + Send {
 }
 
 #[derive(Debug)]
+struct OpenFile {
+    inode_id: InodeIdentifier,
+    offset: usize,
+    owner: Pid,
+}
+
+#[derive(Debug)]
 pub struct VirtualFilesystemSwitch {
     fs: HashMap<FilesystemId, Box<dyn Filesystem>>,
+    next_open_file_id: OpenFileId,
+    open_files: HashMap<OpenFileId, OpenFile>,
 }
 
 impl VirtualFilesystemSwitch {
@@ -97,7 +106,12 @@ impl VirtualFilesystemSwitch {
         fs.insert(FilesystemId::Main, Box::new(mainfs));
         fs.insert(FilesystemId::Proc, Box::new(procfs));
         fs.insert(FilesystemId::Dev, Box::new(devfs));
-        Self { fs }
+
+        Self {
+            fs,
+            next_open_file_id: OpenFileId(0),
+            open_files: Default::default(),
+        }
     }
 
     pub fn create_file<S: Into<String>>(
@@ -208,6 +222,7 @@ impl VirtualFilesystemSwitch {
     }
 
     pub fn stat_file(&mut self, path: &str, cwd: InodeIdentifier) -> Result<FileStat> {
+        //TODO make cwd optional
         let parts: Vec<&str> = path.split('/').collect();
         let inode = self.resolve_from_parts(&parts, cwd)?;
 
@@ -221,50 +236,93 @@ impl VirtualFilesystemSwitch {
         })
     }
 
-    pub fn list_dir(&mut self, inode_id: InodeIdentifier) -> Result<Vec<DirectoryEntry>> {
+    pub fn list_dir(&mut self, open_file_id: OpenFileId) -> Result<Vec<DirectoryEntry>> {
+        let inode_id = self
+            .open_files
+            .get(&open_file_id)
+            .ok_or("No such open file")?
+            .inode_id;
         let fs = self.fs.get_mut(&inode_id.filesystem_id).unwrap();
         fs.directory_entries(inode_id.number)
     }
 
-    pub fn open_file(
-        &mut self,
-        path: &str,
-        cwd: InodeIdentifier,
-        fd: Fd,
-    ) -> Result<InodeIdentifier> {
+    pub fn open_file(&mut self, path: &str, cwd: InodeIdentifier, pid: Pid) -> Result<OpenFileId> {
         let parts: Vec<&str> = path.split('/').collect();
         let inode = self.resolve_from_parts(&parts, cwd)?;
         let inode_id = inode.id;
 
+        let open_file_id = self.next_open_file_id;
+        self.open_files.insert(
+            open_file_id,
+            OpenFile {
+                inode_id,
+                offset: 0,
+                owner: pid,
+            },
+        );
+        self.next_open_file_id = OpenFileId(self.next_open_file_id.0 + 1);
+
         let fs = self.fs.get_mut(&inode_id.filesystem_id).unwrap();
-        fs.open(inode_id.number, fd)?;
-        Ok(inode_id)
+
+        //TODO do we need to delegate this, or is it enough that the
+        //VFS keeps track of open files?
+        fs.open(inode_id.number, open_file_id)?;
+        Ok(open_file_id)
     }
 
-    pub fn close_file(&mut self, filesystem: FilesystemId, fd: Fd) -> Result<()> {
-        let fs = self.fs.get_mut(&filesystem).unwrap();
-        fs.close(fd)
+    pub fn close_file(&mut self, id: OpenFileId, pid: Pid) -> Result<()> {
+        match self.open_files.entry(id) {
+            Entry::Occupied(e) => {
+                let open_file = e.get();
+                if open_file.owner == pid {
+                    let fs = self.fs.get_mut(&open_file.inode_id.filesystem_id).unwrap();
+                    e.remove();
+                    fs.close(id)
+                } else {
+                    Ok(())
+                }
+            }
+            Entry::Vacant(_) => Err("No such open file".to_owned()),
+        }
     }
 
-    pub fn read_file_at_offset(
-        &mut self,
-        fd: Fd,
-        inode_id: InodeIdentifier,
-        buf: &mut [u8],
-        file_offset: usize,
-    ) -> Result<usize> {
-        let fs = self.fs.get_mut(&inode_id.filesystem_id).unwrap();
-        fs.read(inode_id.number, fd, buf, file_offset)
+    fn get_open_file_mut(&mut self, id: OpenFileId) -> Result<&mut OpenFile> {
+        self.open_files
+            .get_mut(&id)
+            .ok_or(format!("No open file found for id: {:?}", id))
     }
 
-    pub fn write_file_at_offset(
-        &mut self,
-        inode_id: InodeIdentifier,
-        buf: &[u8],
-        file_offset: usize,
-    ) -> Result<usize> {
+    pub fn read_file(&mut self, open_file_id: OpenFileId, buf: &mut [u8]) -> Result<usize> {
+        let (inode_id, offset) = {
+            let open_file = self.get_open_file_mut(open_file_id)?;
+            (open_file.inode_id, open_file.offset)
+        };
+
         let fs = self.fs.get_mut(&inode_id.filesystem_id).unwrap();
-        fs.write(inode_id.number, buf, file_offset)
+        let n_read = fs.read(inode_id.number, open_file_id, buf, offset)?;
+
+        let open_file = self.get_open_file_mut(open_file_id)?;
+        open_file.offset += n_read; //TODO forgetting something?
+        Ok(n_read)
+    }
+
+    pub fn write_file(&mut self, open_file_id: OpenFileId, buf: &[u8]) -> Result<usize> {
+        let (inode_id, offset) = {
+            let open_file = self.get_open_file_mut(open_file_id)?;
+            (open_file.inode_id, open_file.offset)
+        };
+
+        let fs = self.fs.get_mut(&inode_id.filesystem_id).unwrap();
+        let n_read = fs.write(inode_id.number, buf, offset)?;
+
+        let open_file = self.get_open_file_mut(open_file_id)?;
+        open_file.offset += n_read;
+        Ok(n_read)
+    }
+
+    pub fn seek(&mut self, open_file_id: OpenFileId, offset: usize) -> Result<()> {
+        self.get_open_file_mut(open_file_id)?.offset = offset;
+        Ok(())
     }
 
     pub fn path_from_inode(&mut self, inode_id: InodeIdentifier) -> Result<String> {
@@ -300,6 +358,7 @@ impl VirtualFilesystemSwitch {
     }
 
     fn resolve_from_parts(&mut self, mut parts: &[&str], cwd: InodeIdentifier) -> Result<Inode> {
+        //TODO Make cwd optional. Should be possible to call this with absolute paths w/o cwd
         let mut inode = match parts.get(0) {
             Some(&"") => {
                 // (empty string here means the path starts with '/', since we split on it)
@@ -309,8 +368,8 @@ impl VirtualFilesystemSwitch {
                 let fs = self.fs.get(&FilesystemId::Main).unwrap();
                 fs.inode(0).expect("Must have root inode with number 0")
             }
-            None => self.inode(cwd)?,    // creating a file in cwd
-            Some(_) => self.inode(cwd)?, // creating further down
+            None => self.inode(cwd)?,    // resolving a file in cwd
+            Some(_) => self.inode(cwd)?, // resolving something further down in the tree
         };
 
         for part in parts {

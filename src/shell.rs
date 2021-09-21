@@ -1,4 +1,4 @@
-use crate::sys::{ProcessHandle, ProcessResult, WaitPidOptions, WaitPidTarget};
+use crate::sys::{ProcessHandle, ProcessResult, SpawnStdout, WaitPidOptions, WaitPidTarget};
 use crate::util::{FilePermissions, FileStat, FileType, Pid};
 use std::str::FromStr;
 
@@ -42,7 +42,7 @@ impl Shell {
             .sc_wait_pid(WaitPidTarget::AnyChild, WaitPidOptions::NoHang)
             .expect("Wait for background tasks")
         {
-            println!("[{}] finished: {:?}", pid, result);
+            println!("[{}] finished: {:?}", pid.0, result);
         }
     }
 
@@ -179,21 +179,22 @@ impl Shell {
 
     fn kill(&mut self, args: &[&str], sys: &mut ProcessHandle) -> Result<()> {
         let pid = args.get(1).ok_or_else(|| "missing arg".to_owned())?;
-        let pid = Pid::from_str(*pid).map_err(|_| "Not a valid pid".to_owned())?;
+        let pid = u32::from_str(*pid).map_err(|_| "Not a valid pid".to_owned())?;
+        let pid = Pid(pid);
         sys.sc_kill(pid)
     }
 
     fn sleep(&mut self, args: &[&str], handle: &mut ProcessHandle) -> Result<()> {
         match args.get(1) {
             None => {
-                let child_pid = handle.sc_spawn("/bin/sleep")?;
+                let child_pid = handle.sc_spawn("/bin/sleep", SpawnStdout::Inherit)?;
                 let result =
                     handle.sc_wait_pid(WaitPidTarget::Pid(child_pid), WaitPidOptions::Default)?;
                 assert_eq!(result, Some((child_pid, ProcessResult::ExitCode(0))));
             }
             Some(&"&") => {
-                let child_pid = handle.sc_spawn("/bin/sleep")?;
-                println!("[{}] running in background...", child_pid);
+                let child_pid = handle.sc_spawn("/bin/sleep", SpawnStdout::Inherit)?;
+                println!("[{}] running in background...", child_pid.0);
                 self.background_processes.push(child_pid);
             }
             Some(arg) => {

@@ -1,11 +1,18 @@
-/// inode number
+//TODO: Make all these into value structs?
+
+/// inode number. Only unique per filesystem
 pub type Ino = u32;
 
-/// file descriptor
+/// file descriptor. Only unique per process
 pub type Fd = u32;
 
+/// identifies an entry in the 'open files' VFS table. Globally unique
+#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq)]
+pub struct OpenFileId(pub u32);
+
 /// process id
-pub type Pid = u32;
+#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq)]
+pub struct Pid(pub u32);
 
 #[derive(PartialEq, Debug, Clone, Copy)]
 pub enum FileType {

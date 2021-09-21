@@ -1,5 +1,6 @@
 use crate::util::{
-    DirectoryEntry, Fd, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier,
+    DirectoryEntry, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier,
+    OpenFileId,
 };
 use crate::vfs::Filesystem;
 
@@ -10,7 +11,13 @@ pub struct DevFilesystem {
     parent_inode_id: InodeIdentifier,
     root_inode: Inode,
     log_inode: Inode,
+    null_inode: Inode,
+    output_inode: Inode,
 }
+
+//TODO Instead of tracking each individual inode in every
+//method, should we delegate to 'Device' structs that
+//encapsulate the behaviour of a specific device?
 
 impl DevFilesystem {
     pub fn new(parent_inode_id: InodeIdentifier) -> Self {
@@ -34,10 +41,33 @@ impl DevFilesystem {
             size: 0,
             permissions: FilePermissions::ReadWrite,
         };
+        let null_inode = Inode {
+            id: InodeIdentifier {
+                filesystem_id: FilesystemId::Dev,
+                number: 2,
+            },
+            parent_id: root_inode.id,
+            file_type: FileType::CharacterDevice,
+            size: 0,
+            permissions: FilePermissions::ReadWrite,
+        };
+        let output_inode = Inode {
+            id: InodeIdentifier {
+                filesystem_id: FilesystemId::Dev,
+                number: 3,
+            },
+            parent_id: root_inode.id,
+            file_type: FileType::CharacterDevice,
+            size: 0,
+            permissions: FilePermissions::ReadWrite,
+        };
+
         Self {
             parent_inode_id,
             root_inode,
             log_inode,
+            null_inode,
+            output_inode,
         }
     }
 }
@@ -60,6 +90,8 @@ impl Filesystem for DevFilesystem {
         match inode_number {
             0 => Ok(self.root_inode),
             1 => Ok(self.log_inode),
+            2 => Ok(self.null_inode),
+            3 => Ok(self.output_inode),
             _ => Err("No such inode on devfs".to_owned()),
         }
     }
@@ -79,12 +111,26 @@ impl Filesystem for DevFilesystem {
 
     fn directory_entries(&mut self, directory: Ino) -> Result<Vec<DirectoryEntry>> {
         match directory {
-            0 => Ok(vec![DirectoryEntry {
-                name: "log".to_owned(),
-                inode_id: self.log_inode.id,
-                file_type: self.log_inode.file_type,
-            }]),
+            0 => Ok(vec![
+                DirectoryEntry {
+                    name: "log".to_owned(),
+                    inode_id: self.log_inode.id,
+                    file_type: self.log_inode.file_type,
+                },
+                DirectoryEntry {
+                    name: "null".to_owned(),
+                    inode_id: self.null_inode.id,
+                    file_type: self.null_inode.file_type,
+                },
+                DirectoryEntry {
+                    name: "output".to_owned(),
+                    inode_id: self.output_inode.id,
+                    file_type: self.output_inode.file_type,
+                },
+            ]),
             1 => Err("Not a directory".to_owned()),
+            2 => Err("Not a directory".to_owned()),
+            3 => Err("Not a directory".to_owned()),
             _ => Err("No such directory".to_owned()),
         }
     }
@@ -97,26 +143,28 @@ impl Filesystem for DevFilesystem {
         panic!("We shouldn't get here? devfs update_inode_parent")
     }
 
-    fn open(&mut self, inode_number: Ino, fd: Fd) -> Result<()> {
-        eprintln!("devfs open({}, {})", inode_number, fd);
+    fn open(&mut self, inode_number: Ino, id: OpenFileId) -> Result<()> {
+        eprintln!("devfs open({}, {:?})", inode_number, id);
         Ok(())
     }
 
-    fn close(&mut self, fd: Fd) -> Result<()> {
-        eprintln!("devfs close({})", fd);
+    fn close(&mut self, id: OpenFileId) -> Result<()> {
+        eprintln!("devfs close({:?})", id);
         Ok(())
     }
 
     fn read(
         &mut self,
         inode_number: Ino,
-        _fd: Fd,
+        _id: OpenFileId,
         _buf: &mut [u8],
         _file_offset: usize,
     ) -> Result<usize> {
         match inode_number {
             0 => Err("Can't read directory".to_owned()),
             1 => Ok(0),
+            2 => Ok(0),
+            3 => Ok(0),
             _ => Err("No such file".to_owned()),
         }
     }
@@ -126,6 +174,14 @@ impl Filesystem for DevFilesystem {
             0 => Err("Can't write to directory".to_owned()),
             1 => {
                 eprintln!("/dev/log: {}", String::from_utf8_lossy(buf));
+                Ok(buf.len())
+            }
+            2 => {
+                eprintln!("DEBUG: /dev/null: {}", String::from_utf8_lossy(buf));
+                Ok(buf.len())
+            }
+            3 => {
+                println!("{}", String::from_utf8_lossy(buf));
                 Ok(buf.len())
             }
             _ => Err("No such file".to_owned()),
