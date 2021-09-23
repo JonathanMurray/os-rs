@@ -39,7 +39,6 @@ pub struct FileStat {
 pub struct DirectoryEntry {
     pub inode_id: InodeIdentifier,
     pub name: String,
-    pub file_type: FileType,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Hash, std::cmp::Eq)]

@@ -165,7 +165,6 @@ impl ProcFilesystem {
                 let mut listing = vec![DirectoryEntry {
                     inode_id: InodeIdentifier::new(FilesystemId::Proc, 1),
                     name: "status".to_owned(),
-                    file_type: FileType::Regular,
                 }];
                 let process_table_lock = lock_global_process_table();
                 let pid_files: Vec<DirectoryEntry> = process_table_lock
@@ -174,7 +173,6 @@ impl ProcFilesystem {
                     .map(|pid| DirectoryEntry {
                         inode_id: InodeIdentifier::new(FilesystemId::Proc, 1000 + pid.0),
                         name: format!("{}", pid.0),
-                        file_type: FileType::Regular,
                     })
                     .collect();
                 listing.extend(pid_files);

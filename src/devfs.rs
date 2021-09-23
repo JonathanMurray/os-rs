@@ -115,17 +115,14 @@ impl Filesystem for DevFilesystem {
                 DirectoryEntry {
                     name: "log".to_owned(),
                     inode_id: self.log_inode.id,
-                    file_type: self.log_inode.file_type,
                 },
                 DirectoryEntry {
                     name: "null".to_owned(),
                     inode_id: self.null_inode.id,
-                    file_type: self.null_inode.file_type,
                 },
                 DirectoryEntry {
                     name: "output".to_owned(),
                     inode_id: self.output_inode.id,
-                    file_type: self.output_inode.file_type,
                 },
             ]),
             1 => Err("Not a directory".to_owned()),

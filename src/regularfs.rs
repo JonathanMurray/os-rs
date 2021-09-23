@@ -42,13 +42,14 @@ impl File {
 
 #[derive(Debug)]
 pub struct RegularFilesystem {
-    inodes: Vec<Inode>,
+    inodes: HashMap<Ino, Inode>,
     next_inode_number: Ino,
     files: HashMap<Ino, File>,
 }
 
 impl RegularFilesystem {
     pub fn new(root_inode: Inode) -> Self {
+        assert_eq!(root_inode.id.filesystem_id, FilesystemId::Main);
         let next_inode_number = root_inode.id.number + 1;
         let mut files = HashMap::new();
         files.insert(
@@ -58,8 +59,10 @@ impl RegularFilesystem {
                 open_ids: Default::default(),
             },
         );
+        let mut inodes = HashMap::new();
+        inodes.insert(root_inode.id.number, root_inode);
         Self {
-            inodes: vec![root_inode],
+            inodes,
             next_inode_number,
             files,
         }
@@ -83,7 +86,7 @@ impl RegularFilesystem {
             size: 0,
             permissions,
         };
-        self.inodes.push(inode);
+        self.inodes.insert(inode_number, inode);
         self.files.insert(inode_number, File::new(file_type));
 
         inode_number
@@ -93,7 +96,7 @@ impl RegularFilesystem {
         //TODO remove directory / regular file
         //TODO if someone has an open file, don't delete it in such a way that
         // read/writes start failing for that process
-        self.inodes.retain(|inode| inode.id.number != inode_number);
+        self.inodes.remove(&inode_number);
         Ok(())
     }
 
@@ -151,12 +154,9 @@ impl RegularFilesystem {
         let dir = self.directory(inode_number)?;
         let listing = dir
             .iter()
-            .map(|(name, id)| {
-                DirectoryEntry {
-                    inode_id: *id,
-                    name: name.clone(),
-                    file_type: FileType::Regular, //TODO
-                }
+            .map(|(name, id)| DirectoryEntry {
+                inode_id: *id,
+                name: name.clone(),
             })
             .collect();
         Ok(listing)
@@ -168,10 +168,6 @@ impl RegularFilesystem {
             .get_mut(&inode_number)
             .ok_or_else(|| "No such file".to_owned())?;
 
-        //TODO this is broken. Two processes can open a file with
-        //identical id numbers. Maybe the 'id' concept shouldn't
-        //reach this far down, and we're lacking a 'File' concept
-        //on the VFS level.
         assert!(
             !file.open_ids.contains(&id),
             "{} is already opened with id {:?}",
@@ -248,18 +244,15 @@ impl RegularFilesystem {
 
     fn inode_mut(&mut self, inode_number: Ino) -> Result<&mut Inode> {
         self.inodes
-            .iter_mut()
-            .find(|inode| inode.id.number == inode_number)
+            .get_mut(&inode_number)
             .ok_or_else(|| format!("No inode with number: {}", inode_number))
     }
 
     fn inode(&self, inode_number: Ino) -> Result<Inode> {
-        let inode = *self
-            .inodes
-            .iter()
-            .find(|inode| inode.id.number == inode_number)
-            .ok_or_else(|| format!("No inode with number: {}", inode_number))?;
-        Ok(inode)
+        self.inodes
+            .get(&inode_number)
+            .copied()
+            .ok_or_else(|| format!("No inode with number: {}", inode_number))
     }
 }
 
