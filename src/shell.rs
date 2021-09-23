@@ -1,11 +1,12 @@
 use crate::sys::{ProcessHandle, ProcessResult, SpawnStdout, WaitPidOptions, WaitPidTarget};
 use crate::util::{FilePermissions, FileStat, FileType, Pid};
+use std::collections::HashSet;
 use std::str::FromStr;
 
 type Result<T> = core::result::Result<T, String>;
 
 pub struct Shell {
-    background_processes: Vec<Pid>,
+    background_processes: HashSet<Pid>,
 }
 
 impl Shell {
@@ -17,32 +18,42 @@ impl Shell {
 
     pub fn handle(&mut self, handle: &mut ProcessHandle, input: String) {
         let words: Vec<&str> = input.split_whitespace().collect();
-        let result = match words.get(0) {
-            Some(&"stat") => self.stat(&words, handle),
-            Some(&"cat") => self.cat(&words, handle),
-            Some(&"ls") => self.ls(&words, handle),
-            Some(&"ll") => self.ll(&words, handle),
-            Some(&"touch") => self.touch(&words, handle),
-            Some(&"mkdir") => self.mkdir(&words, handle),
-            Some(&"rm") => self.rm(&words, handle),
-            Some(&"mv") => self.mv(&words, handle),
-            Some(&"cd") => self.cd(&words, handle),
-            Some(&"help") => self.help(&words, handle),
-            Some(&"kill") => self.kill(&words, handle),
-            Some(&"sleep") => self.sleep(&words, handle),
-            Some(&"ps") => self.ps(&words, handle),
-            None => Ok(()),
-            _ => Err("Unknown command".to_owned()),
-        };
-        if let Err(e) = result {
-            println!("Error: {}", e);
+        if !words.is_empty() {
+            if let Err(e) = self.handle_command(handle, words) {
+                println!("Error: {}", e);
+            }
         }
+        self.check_finished_background_tasks(handle);
+    }
 
+    fn check_finished_background_tasks(&mut self, handle: &mut ProcessHandle) {
         while let Some((pid, result)) = handle
             .sc_wait_pid(WaitPidTarget::AnyChild, WaitPidOptions::NoHang)
             .expect("Wait for background tasks")
         {
+            self.background_processes.remove(&pid);
             println!("[{}] finished: {:?}", pid.0, result);
+        }
+    }
+
+    fn handle_command(&mut self, handle: &mut ProcessHandle, words: Vec<&str>) -> Result<()> {
+        let command = words[0];
+        match command {
+            "stat" => self.stat(&words, handle),
+            "cat" => self.cat(&words, handle),
+            "ls" => self.ls(&words, handle),
+            "ll" => self.ll(&words, handle),
+            "touch" => self.touch(&words, handle),
+            "mkdir" => self.mkdir(&words, handle),
+            "rm" => self.rm(&words, handle),
+            "mv" => self.mv(&words, handle),
+            "cd" => self.cd(&words, handle),
+            "help" => self.help(&words, handle),
+            "kill" => self.kill(&words, handle),
+            "sleep" => self.sleep(&words, handle),
+            "ps" => self.ps(&words, handle),
+            "jobs" => self.jobs(&words, handle),
+            _ => Err("Unknown command".to_owned()),
         }
     }
 
@@ -195,7 +206,7 @@ impl Shell {
             Some(&"&") => {
                 let child_pid = handle.sc_spawn("/bin/sleep", SpawnStdout::Inherit)?;
                 println!("[{}] running in background...", child_pid.0);
-                self.background_processes.push(child_pid);
+                self.background_processes.insert(child_pid);
             }
             Some(arg) => {
                 return Err(format!("Unknown arg: {}", arg));
@@ -237,6 +248,17 @@ impl Shell {
 
         handle.sc_close(fd)?;
 
+        Ok(())
+    }
+
+    fn jobs(&mut self, _args: &[&str], handle: &mut ProcessHandle) -> Result<()> {
+        self.check_finished_background_tasks(handle);
+
+        if !self.background_processes.is_empty() {
+            for pid in self.background_processes.iter() {
+                println!("[{}] Running", pid.0);
+            }
+        }
         Ok(())
     }
 }
