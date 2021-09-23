@@ -99,8 +99,15 @@ impl Shell {
         let fd = sys.sc_open(path)?;
         let mut buf = vec![0; 1024];
         loop {
-            //TODO if reading fails here, we leak the FD
-            let n = sys.sc_read(fd, &mut buf)?;
+            let n = match sys.sc_read(fd, &mut buf) {
+                Ok(n) => n,
+                Err(e) => {
+                    if let Err(e) = sys.sc_close(fd) {
+                        println!("WARN: Failed to close after failing to read: {}", e);
+                    }
+                    return Err(e);
+                }
+            };
             if n > 0 {
                 let s = String::from_utf8_lossy(&buf[..n]);
                 print!("{}", s);
