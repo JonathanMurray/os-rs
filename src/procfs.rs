@@ -36,6 +36,13 @@ impl ProcFilesystem {
         }
     }
 
+    pub fn root_inode_id(&self) -> InodeIdentifier {
+        InodeIdentifier {
+            filesystem_id: FilesystemId::Proc,
+            number: 0,
+        }
+    }
+
     pub fn open_file(&mut self, inode_number: Ino, open_file_id: OpenFileId) -> Result<()> {
         match inode_number {
             1 => {

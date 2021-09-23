@@ -47,9 +47,22 @@ pub struct RegularFilesystem {
     files: HashMap<Ino, File>,
 }
 
+const ROOT_INODE_NUMBER: u32 = 0;
+
 impl RegularFilesystem {
-    pub fn new(root_inode: Inode) -> Self {
-        assert_eq!(root_inode.id.filesystem_id, FilesystemId::Main);
+    pub fn new() -> Self {
+        let root_inode_id = InodeIdentifier {
+            filesystem_id: FilesystemId::Main,
+            number: ROOT_INODE_NUMBER,
+        };
+        let root_inode = Inode {
+            parent_id: root_inode_id, //root has self as parent
+            id: root_inode_id,
+            file_type: FileType::Directory,
+            size: 0,
+            permissions: FilePermissions::ReadOnly,
+        };
+
         let next_inode_number = root_inode.id.number + 1;
         let mut files = HashMap::new();
         files.insert(
@@ -65,6 +78,13 @@ impl RegularFilesystem {
             inodes,
             next_inode_number,
             files,
+        }
+    }
+
+    pub fn root_inode_id(&self) -> InodeIdentifier {
+        InodeIdentifier {
+            filesystem_id: FilesystemId::Main,
+            number: ROOT_INODE_NUMBER,
         }
     }
 

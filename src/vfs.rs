@@ -66,42 +66,25 @@ pub struct VirtualFilesystemSwitch {
 
 impl VirtualFilesystemSwitch {
     pub fn new() -> Self {
-        let root_inode_id = InodeIdentifier {
-            filesystem_id: FilesystemId::Main,
-            number: 0,
-        };
-        let root_inode = Inode {
-            parent_id: root_inode_id, //root has self as parent
-            id: root_inode_id,
-            file_type: FileType::Directory,
-            size: 0,
-            permissions: FilePermissions::ReadOnly,
-        };
-        let mut mainfs = RegularFilesystem::new(root_inode);
-        //TODO we shouldn't decide inode number for these mount root directories
-        //Instead Filesystem should be able to mount itself and work out the details
+        let mut mainfs = RegularFilesystem::new();
+        let root_inode_id = mainfs.root_inode_id();
+        let procfs = ProcFilesystem::new(root_inode_id);
+        let devfs = DevFilesystem::new(root_inode_id);
         mainfs
             .add_directory_entry(
                 root_inode_id.number,
                 "proc".to_owned(),
-                InodeIdentifier {
-                    filesystem_id: FilesystemId::Proc,
-                    number: 0,
-                },
+                procfs.root_inode_id(),
             )
             .expect("Add proc to root dir");
         mainfs
             .add_directory_entry(
                 root_inode_id.number,
                 "dev".to_owned(),
-                InodeIdentifier {
-                    filesystem_id: FilesystemId::Dev,
-                    number: 0,
-                },
+                devfs.root_inode_id(),
             )
             .expect("Add dev to root dir");
-        let procfs = ProcFilesystem::new(root_inode_id);
-        let devfs = DevFilesystem::new(root_inode_id);
+
         let mut fs: HashMap<FilesystemId, Box<dyn Filesystem>> = HashMap::new();
         fs.insert(FilesystemId::Main, Box::new(mainfs));
         fs.insert(FilesystemId::Proc, Box::new(procfs));

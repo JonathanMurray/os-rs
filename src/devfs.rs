@@ -70,6 +70,10 @@ impl DevFilesystem {
             output_inode,
         }
     }
+
+    pub fn root_inode_id(&self) -> InodeIdentifier {
+        self.root_inode.id
+    }
 }
 
 impl Filesystem for DevFilesystem {
