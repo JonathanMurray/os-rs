@@ -52,6 +52,7 @@ pub trait Filesystem: std::fmt::Debug + Send {
     fn write(&mut self, inode_number: Ino, buf: &[u8], file_offset: usize) -> Result<usize>;
 }
 
+/// aka file description (POSIX) or file handle
 #[derive(Debug)]
 struct OpenFile {
     inode_id: InodeIdentifier,
@@ -157,8 +158,8 @@ impl VirtualFilesystemSwitch {
 
         let fs = self.fs.get_mut(&inode_id.filesystem_id).unwrap();
         fs.remove(inode_id.number)?;
-        let fs = self.fs.get_mut(&parent_id.filesystem_id).unwrap();
-        fs.remove_directory_entry(parent_id.number, inode_id)
+        let parent_fs = self.fs.get_mut(&parent_id.filesystem_id).unwrap();
+        parent_fs.remove_directory_entry(parent_id.number, inode_id)
     }
 
     pub fn rename_file<S: Into<String>>(

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use std::sync::MutexGuard;
 use std::time::Instant;
@@ -18,12 +18,16 @@ fn lock_global_process_table() -> MutexGuard<'static, GlobalProcessTable> {
 }
 
 #[derive(Debug)]
+enum File {
+    Regular(String),
+    Directory,
+}
+
+#[derive(Debug)]
 pub struct ProcFilesystem {
     parent_inode_id: InodeIdentifier,
     startup_time: Instant,
-    //TODO unify handling of files/directories ==> clearer error handling
-    file_contents: HashMap<OpenFileId, String>,
-    open_directories: HashSet<OpenFileId>,
+    open_files: HashMap<OpenFileId, File>,
 }
 
 impl ProcFilesystem {
@@ -31,8 +35,7 @@ impl ProcFilesystem {
         Self {
             parent_inode_id,
             startup_time: Instant::now(),
-            file_contents: HashMap::new(),
-            open_directories: HashSet::new(),
+            open_files: Default::default(),
         }
     }
 
@@ -61,11 +64,11 @@ impl ProcFilesystem {
                 for line in lines.into_iter().map(|pair| pair.1) {
                     content.push_str(&line);
                 }
-                self.file_contents.insert(open_file_id, content);
+                self.open_files.insert(open_file_id, File::Regular(content));
                 Ok(())
             }
             0 => {
-                self.open_directories.insert(open_file_id);
+                self.open_files.insert(open_file_id, File::Directory);
                 Ok(())
             }
             _ => {
@@ -80,7 +83,7 @@ impl ProcFilesystem {
                             content.push_str(log_line);
                             content.push('\n');
                         }
-                        self.file_contents.insert(open_file_id, content);
+                        self.open_files.insert(open_file_id, File::Regular(content));
                         return Ok(());
                     } else {
                         println!("DEBUG: No process with pid: {:?}", pid);
@@ -96,8 +99,7 @@ impl ProcFilesystem {
     }
 
     pub fn close_file(&mut self, open_file_id: OpenFileId) -> Result<()> {
-        let closed_regular_file = self.file_contents.remove(&open_file_id).is_some();
-        if !closed_regular_file && !self.open_directories.remove(&open_file_id) {
+        if !self.open_files.remove(&open_file_id).is_some() {
             return Err(format!("No open file with id: {:?}", open_file_id));
         }
 
@@ -191,17 +193,18 @@ impl ProcFilesystem {
         buf: &mut [u8],
         file_offset: usize,
     ) -> Result<usize> {
-        if self.open_directories.contains(&open_file_id) {
-            return Err("Cannot read directory".to_owned());
-        }
-        let content = self
-            .file_contents
+        let file = self
+            .open_files
             .get(&open_file_id)
-            .ok_or_else(|| format!("No open file on procfs with id {:?}", open_file_id))?;
-        let mut cursor = Cursor::new(&content);
-        cursor.set_position(file_offset as u64);
-        let num_read = cursor.read(buf).expect("Failed to read from file");
-        Ok(num_read)
+            .ok_or_else(|| format!("No open file on procfs with id: {:?}", open_file_id))?;
+        if let File::Regular(content) = file {
+            let mut cursor = Cursor::new(&content);
+            cursor.set_position(file_offset as u64);
+            let num_read = cursor.read(buf).expect("Failed to read from file");
+            Ok(num_read)
+        } else {
+            Err("Cannot read directory".to_owned())
+        }
     }
 }
 
