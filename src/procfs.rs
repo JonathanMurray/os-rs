@@ -36,13 +36,6 @@ impl ProcFilesystem {
         }
     }
 
-    pub fn root_inode_id(&self) -> InodeIdentifier {
-        InodeIdentifier {
-            filesystem_id: FilesystemId::Proc,
-            number: 0,
-        }
-    }
-
     pub fn open_file(&mut self, inode_number: Ino, open_file_id: OpenFileId) -> Result<()> {
         match inode_number {
             1 => {
@@ -59,8 +52,8 @@ impl ProcFilesystem {
                         proc.parent_pid.0,
                         proc.name,
                         proc.state,
-                        proc.open_files.len(),
-                        proc.open_files
+                        proc.fds.len(),
+                        proc.fds
                     );
                     lines.push((proc.pid, line));
                 }
@@ -213,6 +206,13 @@ impl ProcFilesystem {
 }
 
 impl Filesystem for ProcFilesystem {
+    fn root_inode_id(&self) -> InodeIdentifier {
+        InodeIdentifier {
+            filesystem_id: FilesystemId::Proc,
+            number: 0,
+        }
+    }
+
     fn create(
         &mut self,
         _parent_directory: InodeIdentifier,

@@ -83,8 +83,7 @@ pub struct Process {
     pub pid: Pid,
     pub parent_pid: Pid,
     pub name: String,
-    //TODO rename this to fds?
-    pub open_files: HashMap<Fd, OpenFileId>,
+    pub fds: HashMap<Fd, OpenFileId>,
     next_fd: Fd,
     cwd: InodeIdentifier,
     pub log: Vec<String>,
@@ -102,9 +101,9 @@ impl Process {
         };
 
         let mut next_fd = 1;
-        let mut open_files = HashMap::new();
+        let mut fds = HashMap::new();
         if let Some(stdout) = stdout {
-            open_files.insert(next_fd, stdout);
+            fds.insert(next_fd, stdout);
             next_fd = 2;
         }
 
@@ -112,7 +111,7 @@ impl Process {
             pid,
             parent_pid,
             name,
-            open_files,
+            fds,
             next_fd,
             cwd,
             log: vec![],
@@ -123,20 +122,20 @@ impl Process {
     }
 
     fn find_open_file(&mut self, fd: Fd) -> Result<OpenFileId> {
-        self.open_files
+        self.fds
             .get(&fd)
             .copied()
             .ok_or_else(|| format!("No such fd: {}", fd))
     }
 
     fn take_open_file(&mut self, fd: Fd) -> Result<OpenFileId> {
-        self.open_files
+        self.fds
             .remove(&fd)
             .ok_or_else(|| format!("No such fd: {}", fd))
     }
 
-    fn take_open_files(&mut self) -> HashMap<Fd, OpenFileId> {
-        std::mem::take(&mut self.open_files)
+    fn take_fds(&mut self) -> HashMap<Fd, OpenFileId> {
+        std::mem::take(&mut self.fds)
     }
 
     fn ensure_zombified(&mut self, result: ProcessResult) {
@@ -224,14 +223,14 @@ impl System {
     }
 }
 
-fn close_zombies_files(mut active_handle: ActiveProcessHandle, pid: Pid) {
+fn close_zombies_fds(mut active_handle: ActiveProcessHandle, pid: Pid) {
     let mut processes = active_handle.process_table();
     let process = processes.process(pid).unwrap();
-    let open_files = process.take_open_files();
+    let fds = process.take_fds();
     //Release lock before using VFS
     drop(processes);
-    eprintln!("Closing zombie files: {:?}", open_files);
-    active_handle.sys.close_files(open_files.into_values(), pid);
+    eprintln!("Closing zombie fds: {:?}", fds);
+    active_handle.sys.close_files(fds.into_values(), pid);
 }
 
 #[derive(Debug)]
@@ -260,7 +259,7 @@ impl ProcessHandle {
             drop(processes);
             if killed {
                 eprintln!("{:?} was killed", pid);
-                close_zombies_files(active_handle, pid);
+                close_zombies_fds(active_handle, pid);
                 return None;
             }
         };
@@ -284,7 +283,7 @@ impl ProcessHandle {
             "Spawning {} with stdout option: {:?}. Stdout became: {:?}",
             path, stdout, child_stdout
         );
-        eprintln!("Current proc open files: {:?}", current_proc.open_files);
+        eprintln!("Current proc open files: {:?}", current_proc.fds);
         let child_handle =
             System::spawn_process(processes, child_sys, path, self_pid, child_stdout);
         let child_pid = child_handle.pid;
@@ -308,7 +307,7 @@ impl ProcessHandle {
         // Release process lock before using VFS
         drop(processes);
 
-        close_zombies_files(active_handle, self_pid);
+        close_zombies_fds(active_handle, self_pid);
     }
 
     pub fn sc_wait_pid(
@@ -421,7 +420,7 @@ impl ProcessHandle {
 
         let mut processes = active_context.process_table();
         let proc = processes.current();
-        proc.open_files.insert(proc.next_fd, open_file_id);
+        proc.fds.insert(proc.next_fd, open_file_id);
         proc.next_fd += 1;
         Ok(fd)
     }
@@ -592,14 +591,11 @@ impl Drop for ProcessHandle {
 
         if let Some(p) = processes.process(pid) {
             p.ensure_zombified(ProcessResult::ExitCode(0));
-            let open_files = p.take_open_files();
-            eprintln!(
-                "Dropping process {:?}. Will close files: {:?}",
-                pid, open_files
-            );
+            let fds = p.take_fds();
+            eprintln!("Dropping process {:?}. Will close fds: {:?}", pid, fds);
             // Release process lock before using VFS
             drop(processes);
-            sys.close_files(open_files.into_values(), pid);
+            sys.close_files(fds.into_values(), pid);
         } else {
             eprintln!("Process has already been reaped");
         }

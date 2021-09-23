@@ -81,13 +81,6 @@ impl RegularFilesystem {
         }
     }
 
-    pub fn root_inode_id(&self) -> InodeIdentifier {
-        InodeIdentifier {
-            filesystem_id: FilesystemId::Main,
-            number: ROOT_INODE_NUMBER,
-        }
-    }
-
     fn create_inode(
         &mut self,
         file_type: FileType,
@@ -277,6 +270,13 @@ impl RegularFilesystem {
 }
 
 impl Filesystem for RegularFilesystem {
+    fn root_inode_id(&self) -> InodeIdentifier {
+        InodeIdentifier {
+            filesystem_id: FilesystemId::Main,
+            number: ROOT_INODE_NUMBER,
+        }
+    }
+
     fn create(
         &mut self,
         parent_directory: InodeIdentifier,

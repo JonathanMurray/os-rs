@@ -10,6 +10,8 @@ use std::collections::{hash_map::Entry, HashMap};
 type Result<T> = core::result::Result<T, String>;
 
 pub trait Filesystem: std::fmt::Debug + Send {
+    fn root_inode_id(&self) -> InodeIdentifier;
+
     fn create(
         &mut self,
         parent_directory: InodeIdentifier,
@@ -285,7 +287,7 @@ impl VirtualFilesystemSwitch {
         let n_read = fs.read(inode_id.number, open_file_id, buf, offset)?;
 
         let open_file = self.get_open_file_mut(open_file_id)?;
-        open_file.offset += n_read; //TODO forgetting something?
+        open_file.offset += n_read;
         Ok(n_read)
     }
 
@@ -347,9 +349,11 @@ impl VirtualFilesystemSwitch {
                 // (empty string here means the path starts with '/', since we split on it)
                 // We got an absolute path. Start from root.
                 parts = &parts[1..];
-                // TODO: better way for getting the root inode
+
                 let fs = self.fs.get(&FilesystemId::Main).unwrap();
-                fs.inode(0).expect("Must have root inode with number 0")
+                let root_inode_number = fs.root_inode_id().number;
+                fs.inode(root_inode_number)
+                    .expect("Must have root inode with number 0")
             }
             None => self.inode(cwd)?,    // resolving a file in cwd
             Some(_) => self.inode(cwd)?, // resolving something further down in the tree
