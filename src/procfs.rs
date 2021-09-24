@@ -99,7 +99,7 @@ impl ProcFilesystem {
     }
 
     pub fn close_file(&mut self, open_file_id: OpenFileId) -> Result<()> {
-        if !self.open_files.remove(&open_file_id).is_some() {
+        if self.open_files.remove(&open_file_id).is_none() {
             return Err(format!("No open file with id: {:?}", open_file_id));
         }
 

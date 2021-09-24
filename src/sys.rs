@@ -266,6 +266,10 @@ impl ProcessHandle {
         Some(self)
     }
 
+    pub fn sc_getpid(&self) -> Pid {
+        self.pid
+    }
+
     pub fn sc_spawn<S: Into<String>>(&mut self, path: S, stdout: SpawnStdout) -> Result<Pid> {
         let path = path.into();
         let self_pid = self.pid;

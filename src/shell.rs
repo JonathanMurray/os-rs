@@ -53,6 +53,7 @@ impl Shell {
             "sleep" => self.sleep(&words, handle),
             "ps" => self.ps(&words, handle),
             "jobs" => self.jobs(&words, handle),
+            "pid" => self.pid(&words, handle),
             _ => Err("Unknown command".to_owned()),
         }
     }
@@ -266,6 +267,12 @@ impl Shell {
                 println!("[{}] Running", pid.0);
             }
         }
+        Ok(())
+    }
+
+    fn pid(&mut self, _args: &[&str], handle: &mut ProcessHandle) -> Result<()> {
+        let pid = handle.sc_getpid();
+        println!("{}", pid.0);
         Ok(())
     }
 }
