@@ -182,7 +182,7 @@ impl Filesystem for DevFilesystem {
                 Ok(buf.len())
             }
             3 => {
-                println!("{}", String::from_utf8_lossy(buf));
+                print!("{}", String::from_utf8_lossy(buf));
                 Ok(buf.len())
             }
             _ => Err("No such file".to_owned()),

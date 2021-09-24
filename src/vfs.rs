@@ -119,6 +119,15 @@ impl VirtualFilesystemSwitch {
 
         let name = parts[parts.len() - 1].to_owned();
 
+        if self
+            ._list_dir(parent_id)
+            .unwrap()
+            .iter()
+            .any(|x| x.name == name)
+        {
+            return Err("File already exists".to_owned());
+        }
+
         self._create_file(parent_id, file_type, permissions, filesystem_id, name)
     }
 
@@ -228,6 +237,10 @@ impl VirtualFilesystemSwitch {
             .get(&open_file_id)
             .ok_or("No such open file")?
             .inode_id;
+        self._list_dir(inode_id)
+    }
+
+    fn _list_dir(&mut self, inode_id: InodeIdentifier) -> Result<Vec<DirectoryEntry>> {
         let fs = self.fs.get_mut(&inode_id.filesystem_id).unwrap();
         fs.directory_entries(inode_id.number)
     }

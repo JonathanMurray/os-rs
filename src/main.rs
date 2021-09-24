@@ -158,7 +158,7 @@ fn run_sleep_proc(mut handle: ProcessHandle) {
     }
 
     handle
-        .sc_write(1, "Woke up".as_bytes())
+        .sc_write(1, "Woke up\n".as_bytes())
         .expect("writing to stdout");
 
     handle.sc_exit(0);

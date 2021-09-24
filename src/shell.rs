@@ -56,6 +56,7 @@ impl Shell {
             "ps" => self.ps(&words, handle),
             "jobs" => self.jobs(&words, handle),
             "pid" => self.pid(&words, handle),
+            "echo" => self.echo(&words, handle),
             _ => Err("Unknown command".to_owned()),
         }
     }
@@ -169,6 +170,7 @@ impl Shell {
         Ok(())
     }
 
+    /// builtin
     fn cd(&mut self, args: &[&str], sys: &mut ProcessHandle) -> Result<()> {
         if let Some(&path) = args.get(1) {
             sys.sc_chdir(path)
@@ -206,6 +208,7 @@ impl Shell {
     }
 
     fn sleep(&mut self, args: &[&str], handle: &mut ProcessHandle) -> Result<()> {
+        //TODO handle output of more commands with stdout fd
         match args.get(1) {
             None => {
                 let child_pid =
@@ -263,6 +266,7 @@ impl Shell {
         Ok(())
     }
 
+    /// builtin
     fn jobs(&mut self, _args: &[&str], handle: &mut ProcessHandle) -> Result<()> {
         self.check_finished_background_tasks(handle);
 
@@ -277,6 +281,34 @@ impl Shell {
     fn pid(&mut self, _args: &[&str], handle: &mut ProcessHandle) -> Result<()> {
         let pid = handle.sc_getpid();
         println!("{}", pid.0);
+        Ok(())
+    }
+
+    fn echo(&mut self, mut args: &[&str], handle: &mut ProcessHandle) -> Result<()> {
+        //TODO turn redirect into a general thing that works for all commands
+        let output_file = match args {
+            [before_redirect @ .., ">", file] => {
+                args = before_redirect;
+                Some(file)
+            }
+            _ => None,
+        };
+        let output = [&args[1..].join(" "), "\n"].concat();
+
+        match output_file {
+            Some(&f) => {
+                handle.sc_create(f, FileType::Regular, FilePermissions::ReadWrite)?;
+                let fd = handle.sc_open(f)?;
+                if let Err(e) = handle.sc_write(fd, output.as_bytes()) {
+                    handle.sc_close(fd)?;
+                    return Err(e);
+                }
+                handle.sc_close(fd)?;
+            }
+            None => {
+                handle.sc_write(1, output.as_bytes())?;
+            }
+        }
         Ok(())
     }
 }
