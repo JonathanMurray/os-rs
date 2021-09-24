@@ -1,4 +1,6 @@
-use crate::sys::{ProcessHandle, ProcessResult, SpawnStdout, WaitPidOptions, WaitPidTarget};
+use crate::sys::{
+    ProcessHandle, ProcessResult, SpawnStdout, SpawnUid, WaitPidOptions, WaitPidTarget,
+};
 use crate::util::{FilePermissions, FileStat, FileType, Pid};
 use std::collections::HashSet;
 use std::str::FromStr;
@@ -206,13 +208,15 @@ impl Shell {
     fn sleep(&mut self, args: &[&str], handle: &mut ProcessHandle) -> Result<()> {
         match args.get(1) {
             None => {
-                let child_pid = handle.sc_spawn("/bin/sleep", SpawnStdout::Inherit)?;
+                let child_pid =
+                    handle.sc_spawn("/bin/sleep", SpawnStdout::Inherit, SpawnUid::Inherit)?;
                 let result =
                     handle.sc_wait_pid(WaitPidTarget::Pid(child_pid), WaitPidOptions::Default)?;
                 assert_eq!(result, Some((child_pid, ProcessResult::ExitCode(0))));
             }
             Some(&"&") => {
-                let child_pid = handle.sc_spawn("/bin/sleep", SpawnStdout::Inherit)?;
+                let child_pid =
+                    handle.sc_spawn("/bin/sleep", SpawnStdout::Inherit, SpawnUid::Inherit)?;
                 println!("[{}] running in background...", child_pid.0);
                 self.background_processes.insert(child_pid);
             }
@@ -243,14 +247,14 @@ impl Shell {
         lines.next(); // uptime
         lines.next(); // number of processes
         println!(
-            "{:>4}{:>8}  {:<10}{:>4}  NAME",
-            "PID", "PARENT", "STATE", "FDs"
+            "{:>4}{:>4}{:>8}  {:<10}{:>4}  NAME",
+            "UID", "PID", "PARENT", "STATE", "FDs"
         );
         for line in lines {
             let words: Vec<&str> = line.split(' ').collect();
             println!(
-                "{:>4}{:>8}  {:<10}{:>4}  {}",
-                words[0], words[1], words[3], words[4], words[2]
+                "{:>4}{:>4}{:>8}  {:<10}{:>4}  {}",
+                words[4], words[0], words[1], words[3], words[5], words[2]
             );
         }
 

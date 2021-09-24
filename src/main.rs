@@ -12,9 +12,10 @@ use std::time::Duration;
 
 use crate::shell::Shell;
 use crate::sys::{
-    ProcessHandle, SpawnStdout, System, WaitPidOptions, WaitPidTarget, GLOBAL_PROCESS_TABLE,
+    ProcessHandle, SpawnStdout, SpawnUid, System, WaitPidOptions, WaitPidTarget,
+    GLOBAL_PROCESS_TABLE,
 };
-use crate::util::{FilePermissions, FileType, Pid};
+use crate::util::{FilePermissions, FileType, Pid, Uid};
 
 #[tokio::main]
 pub async fn main() {
@@ -28,7 +29,8 @@ pub async fn main() {
     let sys = Arc::new(Mutex::new(sys));
     {
         let processes = GLOBAL_PROCESS_TABLE.lock().unwrap();
-        let init_handle = System::spawn_process(processes, sys, "init".to_owned(), Pid(0), None);
+        let init_handle =
+            System::spawn_process(processes, sys, "init".to_owned(), Pid(0), Uid(0), None);
         let liveness = Arc::clone(&liveness);
         tokio::task::spawn_blocking(move || run_init_proc(init_handle, liveness))
     };
@@ -71,16 +73,20 @@ fn run_init_proc(mut handle: ProcessHandle, liveness_checker: Arc<()>) {
     handle
         .sc_create("/bin/shell", FileType::Regular, FilePermissions::ReadOnly)
         .unwrap();
-
     let shell_stdout = handle
         .sc_open("/dev/output")
         .expect("/dev/output must exist to be used as shell stdout");
+    let shell_uid = Uid(1);
     handle
-        .sc_spawn("/bin/shell", SpawnStdout::OpenFile(shell_stdout))
+        .sc_spawn(
+            "/bin/shell",
+            SpawnStdout::OpenFile(shell_stdout),
+            SpawnUid::Uid(shell_uid),
+        )
         .expect("spawn shell from init");
 
     handle
-        .sc_spawn("/bin/background", SpawnStdout::Inherit)
+        .sc_spawn("/bin/background", SpawnStdout::Inherit, SpawnUid::Inherit)
         .expect("spawn background proc from init");
 
     handle
@@ -96,7 +102,7 @@ fn run_init_proc(mut handle: ProcessHandle, liveness_checker: Arc<()>) {
         };
 
         handle
-            .sc_spawn("/bin/script", SpawnStdout::Inherit)
+            .sc_spawn("/bin/script", SpawnStdout::Inherit, SpawnUid::Inherit)
             .expect("spawn child from init");
         let child_result = handle
             .sc_wait_pid(WaitPidTarget::AnyChild, WaitPidOptions::Default)
@@ -106,7 +112,7 @@ fn run_init_proc(mut handle: ProcessHandle, liveness_checker: Arc<()>) {
             .unwrap();
 
         let sleep_pid = handle
-            .sc_spawn("/bin/sleep", SpawnStdout::Inherit)
+            .sc_spawn("/bin/sleep", SpawnStdout::Inherit, SpawnUid::Inherit)
             .expect("spawn sleep from init");
         handle
             .sc_wait_pid(WaitPidTarget::Pid(sleep_pid), WaitPidOptions::Default)

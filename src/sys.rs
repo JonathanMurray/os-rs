@@ -1,6 +1,6 @@
 use crate::util::{
     DirectoryEntry, Fd, FilePermissions, FileStat, FileType, FilesystemId, InodeIdentifier,
-    OpenFileId, Pid,
+    OpenFileId, Pid, Uid,
 };
 use crate::vfs::VirtualFilesystemSwitch;
 use once_cell::sync::Lazy;
@@ -34,9 +34,15 @@ pub struct GlobalProcessTable {
 }
 
 impl GlobalProcessTable {
-    fn add(&mut self, process_name: String, parent_pid: Pid, stdout: Option<OpenFileId>) -> Pid {
+    fn add(
+        &mut self,
+        process_name: String,
+        parent_pid: Pid,
+        uid: Uid,
+        stdout: Option<OpenFileId>,
+    ) -> Pid {
         let pid = self.next_pid;
-        let process = Process::new(pid, parent_pid, process_name, stdout);
+        let process = Process::new(pid, parent_pid, uid, process_name, stdout);
         self.next_pid = Pid(self.next_pid.0 + 1);
         self.processes.insert(pid, process);
         pid
@@ -82,6 +88,7 @@ pub enum ProcessResult {
 pub struct Process {
     pub pid: Pid,
     pub parent_pid: Pid,
+    pub uid: Uid,
     pub name: String,
     pub fds: HashMap<Fd, OpenFileId>,
     next_fd: Fd,
@@ -93,7 +100,7 @@ pub struct Process {
 }
 
 impl Process {
-    fn new(pid: Pid, parent_pid: Pid, name: String, stdout: Option<OpenFileId>) -> Self {
+    fn new(pid: Pid, parent_pid: Pid, uid: Uid, name: String, stdout: Option<OpenFileId>) -> Self {
         //TODO don't rely on / having ino=0 everywhere
         let cwd = InodeIdentifier {
             filesystem_id: FilesystemId::Main,
@@ -110,6 +117,7 @@ impl Process {
         Process {
             pid,
             parent_pid,
+            uid,
             name,
             fds,
             next_fd,
@@ -205,9 +213,10 @@ impl System {
         sys: Arc<Mutex<System>>,
         name: String,
         parent_pid: Pid,
+        uid: Uid,
         stdout: Option<OpenFileId>,
     ) -> ProcessHandle {
-        let pid = processes.add(name, parent_pid, stdout);
+        let pid = processes.add(name, parent_pid, uid, stdout);
         ProcessHandle {
             shared_sys: sys,
             pid,
@@ -270,7 +279,12 @@ impl ProcessHandle {
         self.pid
     }
 
-    pub fn sc_spawn<S: Into<String>>(&mut self, path: S, stdout: SpawnStdout) -> Result<Pid> {
+    pub fn sc_spawn<S: Into<String>>(
+        &mut self,
+        path: S,
+        stdout: SpawnStdout,
+        uid: SpawnUid,
+    ) -> Result<Pid> {
         let path = path.into();
         let self_pid = self.pid;
         let child_sys = self.shared_sys.clone();
@@ -283,13 +297,23 @@ impl ProcessHandle {
             SpawnStdout::Inherit => current_proc.find_open_file(1).ok(),
             SpawnStdout::OpenFile(fd) => current_proc.find_open_file(fd).ok(),
         };
+        let child_uid = match uid {
+            SpawnUid::Inherit => current_proc.uid,
+            SpawnUid::Uid(uid) => uid,
+        };
         eprintln!(
-            "Spawning {} with stdout option: {:?}. Stdout became: {:?}",
-            path, stdout, child_stdout
+            "Spawning {}. Stdout={:?}, Uid={:?}",
+            path, child_stdout, child_uid,
         );
         eprintln!("Current proc open files: {:?}", current_proc.fds);
-        let child_handle =
-            System::spawn_process(processes, child_sys, path, self_pid, child_stdout);
+        let child_handle = System::spawn_process(
+            processes,
+            child_sys,
+            path,
+            self_pid,
+            child_uid,
+            child_stdout,
+        );
         let child_pid = child_handle.pid;
 
         let mut spawn_queue = GLOBAL_PROCESS_SPAWN_QUEUE.lock().unwrap();
@@ -372,6 +396,7 @@ impl ProcessHandle {
         let active_context = ActiveProcessHandle::new(self);
         let mut processes = active_context.process_table();
         let current_proc = processes.current();
+        let self_uid = current_proc.uid;
         current_proc.log.push(format!("kill({:?})", pid));
         if active_context.pid == pid {
             return Err("Cannot kill self".to_owned());
@@ -379,6 +404,12 @@ impl ProcessHandle {
         let victim_proc = processes
             .process(pid)
             .ok_or_else(|| "No such process".to_owned())?;
+        if victim_proc.uid != self_uid {
+            return Err(format!(
+                "Cannot kill process with uid: {:?}",
+                victim_proc.uid
+            ));
+        }
         victim_proc.kill_signal();
         Ok(())
     }
@@ -624,6 +655,12 @@ pub enum SpawnStdout {
     OpenFile(Fd),
 }
 
+#[derive(Debug)]
+pub enum SpawnUid {
+    Inherit,
+    Uid(Uid),
+}
+
 struct ActiveProcessHandle<'a> {
     pid: Pid,
     sys: MutexGuard<'a, System>,
@@ -694,7 +731,8 @@ mod tests {
             GLOBAL_PROCESS_TABLE.lock().unwrap(),
             Arc::new(Mutex::new(sys)),
             "test".to_owned(),
-            Pid(0),
+            Pid(1),
+            Uid(1),
             None,
         )
     }

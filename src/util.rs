@@ -14,6 +14,10 @@ pub struct OpenFileId(pub u32);
 #[derive(Copy, Clone, Debug, Hash, Eq, PartialEq)]
 pub struct Pid(pub u32);
 
+/// user id
+#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq)]
+pub struct Uid(pub u32);
+
 #[derive(PartialEq, Debug, Clone, Copy)]
 pub enum FileType {
     Regular,

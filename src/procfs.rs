@@ -50,11 +50,12 @@ impl ProcFilesystem {
                 let mut lines = Vec::new();
                 for proc in process_table_lock.iter() {
                     let line = format!(
-                        "{} {} {} {:?} {} {:?}\n",
+                        "{} {} {} {:?} {} {} {:?}\n",
                         proc.pid.0,
                         proc.parent_pid.0,
                         proc.name,
                         proc.state,
+                        proc.uid.0,
                         proc.fds.len(),
                         proc.fds
                     );
