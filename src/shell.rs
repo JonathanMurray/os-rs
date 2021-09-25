@@ -19,9 +19,9 @@ impl Shell {
     }
 
     pub fn handle(&mut self, handle: &mut ProcessHandle, input: String) {
-        let words: Vec<&str> = input.split_whitespace().collect();
-        if !words.is_empty() {
-            if let Err(e) = self.handle_command(handle, words) {
+        let tokens: Vec<&str> = input.split_whitespace().collect();
+        if !tokens.is_empty() {
+            if let Err(e) = self.handle_input(handle, tokens) {
                 println!("Error: {}", e);
             }
         }
@@ -38,25 +38,33 @@ impl Shell {
         }
     }
 
-    fn handle_command(&mut self, handle: &mut ProcessHandle, words: Vec<&str>) -> Result<()> {
-        let command = words[0];
+    fn handle_input(&mut self, handle: &mut ProcessHandle, tokens: Vec<&str>) -> Result<()> {
+        let mut tokens = &tokens[..];
+        let run_in_background = match tokens {
+            [head @ .., "&"] => {
+                tokens = head;
+                true
+            }
+            _ => false,
+        };
+        let command = tokens[0];
         match command {
-            "stat" => self.stat(&words, handle),
-            "cat" => self.cat(&words, handle),
-            "ls" => self.ls(&words, handle),
-            "ll" => self.ll(&words, handle),
-            "touch" => self.touch(&words, handle),
-            "mkdir" => self.mkdir(&words, handle),
-            "rm" => self.rm(&words, handle),
-            "mv" => self.mv(&words, handle),
-            "cd" => self.cd(&words, handle),
-            "help" => self.help(&words, handle),
-            "kill" => self.kill(&words, handle),
-            "sleep" => self.sleep(&words, handle),
-            "ps" => self.ps(&words, handle),
-            "jobs" => self.jobs(&words, handle),
-            "pid" => self.pid(&words, handle),
-            "echo" => self.echo(&words, handle),
+            "stat" => self.stat(&tokens, handle),
+            "cat" => self.cat(&tokens, handle),
+            "ls" => self.ls(&tokens, handle),
+            "ll" => self.ll(&tokens, handle),
+            "touch" => self.touch(&tokens, handle),
+            "mkdir" => self.mkdir(&tokens, handle),
+            "rm" => self.rm(&tokens, handle),
+            "mv" => self.mv(&tokens, handle),
+            "cd" => self.cd(&tokens, handle),
+            "help" => self.help(&tokens, handle),
+            "kill" => self.kill(&tokens, handle),
+            "sleep" => self.sleep(&tokens, handle, run_in_background),
+            "ps" => self.ps(&tokens, handle),
+            "jobs" => self.jobs(&tokens, handle),
+            "pid" => self.pid(&tokens, handle),
+            "echo" => self.echo(&tokens, handle),
             _ => Err("Unknown command".to_owned()),
         }
     }
@@ -207,26 +215,27 @@ impl Shell {
         sys.sc_kill(pid)
     }
 
-    fn sleep(&mut self, args: &[&str], handle: &mut ProcessHandle) -> Result<()> {
-        //TODO handle output of more commands with stdout fd
-        match args.get(1) {
-            None => {
-                let child_pid =
-                    handle.sc_spawn("/bin/sleep", SpawnStdout::Inherit, SpawnUid::Inherit)?;
-                let result =
-                    handle.sc_wait_pid(WaitPidTarget::Pid(child_pid), WaitPidOptions::Default)?;
-                assert_eq!(result, Some((child_pid, ProcessResult::ExitCode(0))));
-            }
-            Some(&"&") => {
-                let child_pid =
-                    handle.sc_spawn("/bin/sleep", SpawnStdout::Inherit, SpawnUid::Inherit)?;
-                println!("[{}] running in background...", child_pid.0);
-                self.background_processes.insert(child_pid);
-            }
-            Some(arg) => {
-                return Err(format!("Unknown arg: {}", arg));
-            }
+    fn sleep(
+        &mut self,
+        args: &[&str],
+        handle: &mut ProcessHandle,
+        run_in_background: bool,
+    ) -> Result<()> {
+        if args.len() >= 2 {
+            return Err("Unknown argument".to_owned());
         }
+        let child_pid = handle.sc_spawn("/bin/sleep", SpawnStdout::Inherit, SpawnUid::Inherit)?;
+
+        if run_in_background {
+            println!("[{}] running in background...", child_pid.0);
+            self.background_processes.insert(child_pid);
+        } else {
+            let result =
+                handle.sc_wait_pid(WaitPidTarget::Pid(child_pid), WaitPidOptions::Default)?;
+            assert_eq!(result, Some((child_pid, ProcessResult::ExitCode(0))));
+        }
+
+        //TODO handle output of more commands with stdout fd
         Ok(())
     }
 
@@ -254,10 +263,10 @@ impl Shell {
             "UID", "PID", "PARENT", "STATE", "FDs"
         );
         for line in lines {
-            let words: Vec<&str> = line.split(' ').collect();
+            let tokens: Vec<&str> = line.split(' ').collect();
             println!(
                 "{:>4}{:>4}{:>8}  {:<10}{:>4}  {}",
-                words[4], words[0], words[1], words[3], words[5], words[2]
+                tokens[4], tokens[0], tokens[1], tokens[3], tokens[5], tokens[2]
             );
         }
 
