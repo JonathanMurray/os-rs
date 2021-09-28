@@ -1,7 +1,7 @@
 mod devfs;
 mod procfs;
+mod programs;
 mod regularfs;
-mod shell;
 mod sys;
 mod util;
 mod vfs;
@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::devfs::DevFilesystem;
-use crate::shell::ShellProcess;
+use crate::programs::background;
+use crate::programs::shell::ShellProcess;
 use crate::sys::{
     OpenFlags, ProcessHandle, SpawnAction, SpawnFds, SpawnUid, System, WaitPidOptions,
     WaitPidTarget, GLOBAL_PROCESS_TABLE,
@@ -20,6 +21,8 @@ use crate::util::{FilePermissions, FileType, Pid, Uid};
 use crate::vfs::VirtualFilesystemSwitch;
 
 type Result<T> = std::result::Result<T, String>;
+
+const PROGRAM_MAGIC_CODE: &[u8] = &[0xD, 0xE, 0xA, 0xD, 0xB, 0xE, 0xE, 0xF];
 
 #[tokio::main]
 pub async fn main() {
@@ -47,8 +50,7 @@ pub async fn main() {
             "init".to_owned(),
             init_pid,
             Uid(0),
-            None,
-            None,
+            (None, None),
             root_inode_id,
         );
         let liveness = Arc::clone(&liveness);
@@ -91,10 +93,10 @@ fn run_init_proc(mut handle: ProcessHandle, liveness_checker: Arc<()>) {
         .sc_create("/bin", FileType::Directory, FilePermissions::ReadOnly)
         .unwrap();
 
-    create_text_file(&mut handle, "/bin/script", "PROGRAM:script\n").unwrap();
-    create_text_file(&mut handle, "/bin/sleep", "PROGRAM:sleep\n").unwrap();
-    create_text_file(&mut handle, "/bin/background", "PROGRAM:background\n").unwrap();
-    create_text_file(&mut handle, "/bin/shell", "PROGRAM:shell\n").unwrap();
+    create_program_file(&mut handle, "/bin/script", "script").unwrap();
+    create_program_file(&mut handle, "/bin/sleep", "sleep").unwrap();
+    create_program_file(&mut handle, "/bin/background", "background").unwrap();
+    create_program_file(&mut handle, "/bin/shell", "shell").unwrap();
     let log_fd = handle
         .sc_open("/dev/log", OpenFlags::empty(), None)
         .unwrap();
@@ -157,11 +159,14 @@ fn run_init_proc(mut handle: ProcessHandle, liveness_checker: Arc<()>) {
     println!("Init process exiting.");
 }
 
-fn create_text_file(handle: &mut ProcessHandle, path: &str, content: &str) -> Result<()> {
+fn create_program_file(handle: &mut ProcessHandle, path: &str, program_name: &str) -> Result<()> {
     let fd = handle.sc_open(path, OpenFlags::CREATE, Some(FilePermissions::ReadWrite))?;
     //TODO we leak the FD if write fails
-    let content = content.as_bytes();
-    let n_written = handle.sc_write(fd, content)?;
+    let mut content = Vec::new();
+    content.extend(PROGRAM_MAGIC_CODE);
+    content.extend(program_name.as_bytes());
+    content.extend("\n".as_bytes());
+    let n_written = handle.sc_write(fd, &content[..])?;
     assert_eq!(n_written, content.len(), "We didn't writ the whole file");
     handle.sc_close(fd)
 }
@@ -181,24 +186,22 @@ fn run_new_proc(mut handle: ProcessHandle) {
     let n_read = handle.sc_read(fd, &mut buf).unwrap().unwrap();
     handle.sc_close(fd).unwrap();
     assert!(n_read < buf.len(), "We may not have read the full file");
-    let content = match std::str::from_utf8(&buf[..n_read]) {
-        Ok(s) => s,
-        Err(_) => {
-            eprintln!("Not a valid executable: {}. Does not contain text", name);
-            handle.sc_exit(2);
-            return;
-        }
-    };
 
-    match content {
-        "PROGRAM:script\n" => run_script_proc(handle),
-        "PROGRAM:background\n" => run_background_proc(handle),
-        "PROGRAM:shell\n" => run_shell_proc(handle),
-        "PROGRAM:sleep\n" => run_sleep_proc(handle),
-        _ => {
-            eprintln!("Not a valid executable: {}. ({:?})", name, content);
+    match &buf[..n_read].strip_prefix(PROGRAM_MAGIC_CODE) {
+        None => {
+            eprintln!("Not an executable: {}.", name);
             handle.sc_exit(2);
         }
+        Some(rest) => match std::str::from_utf8(rest) {
+            Ok("script\n") => run_script_proc(handle),
+            Ok("background\n") => background::run_background_proc(handle),
+            Ok("shell\n") => ShellProcess::new(handle).run(),
+            Ok("sleep\n") => run_sleep_proc(handle),
+            _ => {
+                eprintln!("Not a valid executable: {}. ({:?})", name, rest);
+                handle.sc_exit(2);
+            }
+        },
     }
 }
 
@@ -231,50 +234,4 @@ fn run_script_proc(mut handle: ProcessHandle) {
     }
 
     handle.sc_exit(0);
-}
-
-fn run_background_proc(mut sys: ProcessHandle) {
-    sys.sc_create("README", FileType::Regular, FilePermissions::ReadWrite)
-        .expect("Create README file");
-    //TODO: create README through open
-    let fd = sys
-        .sc_open("README", OpenFlags::empty(), None)
-        .expect("Open README file");
-    let readme = "Commands:\nstat\ncat\nls\nll\ntouch\nmkdir\ncd\nrm\nmv\nhelp\n";
-    sys.sc_write(fd, readme.as_bytes())
-        .expect("Write to README");
-    sys.sc_close(fd).expect("Close README");
-
-    sys.sc_create("uptime", FileType::Regular, FilePermissions::ReadWrite)
-        .expect("Create uptime file");
-    //TODO create through open
-    let fd = sys
-        .sc_open("uptime", OpenFlags::empty(), None)
-        .expect("Open uptime file");
-    eprintln!("background proc opened uptime file with fd: {}", fd);
-    let mut secs = 0_u64;
-    for _ in 0..50 {
-        sys = if let Some(h) = sys.handle_signals() {
-            h
-        } else {
-            return;
-        };
-
-        std::thread::sleep(Duration::from_secs(1));
-        secs += 1;
-        {
-            sys.sc_seek(fd, 0).expect("seek in uptime file");
-            sys.sc_write(
-                fd,
-                format!("System has been running for {} seconds.\n", secs).as_bytes(),
-            )
-            .expect("Write to uptime file");
-        }
-    }
-    sys.sc_close(fd).expect("Close uptime file");
-}
-
-fn run_shell_proc(handle: ProcessHandle) {
-    let shell = ShellProcess::new(handle);
-    shell.run();
 }

@@ -1,6 +1,5 @@
 use crate::util::{
-    DirectoryEntry, Fd, FilePermissions, FileStat, FileType, InodeIdentifier,
-    OpenFileId, Pid, Uid,
+    DirectoryEntry, Fd, FilePermissions, FileStat, FileType, InodeIdentifier, OpenFileId, Pid, Uid,
 };
 use crate::vfs::VirtualFilesystemSwitch;
 
@@ -42,12 +41,11 @@ impl GlobalProcessTable {
         process_name: String,
         parent_pid: Pid,
         uid: Uid,
-        stdin: Option<Arc<OpenFileId>>,
-        stdout: Option<Arc<OpenFileId>>,
+        fds: (Option<Arc<OpenFileId>>, Option<Arc<OpenFileId>>),
         cwd: InodeIdentifier,
     ) -> Pid {
         let pid = self.next_pid;
-        let process = Process::new(pid, parent_pid, uid, process_name, stdin, stdout, cwd);
+        let process = Process::new(pid, parent_pid, uid, process_name, fds, cwd);
         self.next_pid = Pid(self.next_pid.0 + 1);
         self.processes.insert(pid, process);
         pid
@@ -110,19 +108,18 @@ impl Process {
         parent_pid: Pid,
         uid: Uid,
         name: String,
-        stdin: Option<Arc<OpenFileId>>,
-        stdout: Option<Arc<OpenFileId>>,
+        fds: (Option<Arc<OpenFileId>>, Option<Arc<OpenFileId>>),
         cwd: InodeIdentifier,
     ) -> Self {
         let mut next_fd = 0;
-        let mut fds = HashMap::new();
-        if let Some(stdin) = stdin {
-            fds.insert(next_fd, stdin);
-            next_fd += 1;
+        let mut fd_map = HashMap::new();
+        if let Some(stdin) = fds.0 {
+            fd_map.insert(0, stdin);
+            next_fd = 1;
         }
-        if let Some(stdout) = stdout {
-            fds.insert(next_fd, stdout);
-            next_fd += 1;
+        if let Some(stdout) = fds.1 {
+            fd_map.insert(1, stdout);
+            next_fd = 2;
         }
 
         Process {
@@ -130,7 +127,7 @@ impl Process {
             parent_pid,
             uid,
             name,
-            fds,
+            fds: fd_map,
             next_fd,
             cwd,
             log: vec![],
@@ -253,11 +250,10 @@ impl System {
         name: String,
         parent_pid: Pid,
         uid: Uid,
-        stdin: Option<Arc<OpenFileId>>,
-        stdout: Option<Arc<OpenFileId>>,
+        fds: (Option<Arc<OpenFileId>>, Option<Arc<OpenFileId>>),
         cwd: InodeIdentifier,
     ) -> ProcessHandle {
-        let pid = processes.add(name, parent_pid, uid, stdin, stdout, cwd);
+        let pid = processes.add(name, parent_pid, uid, fds, cwd);
         ProcessHandle {
             shared_sys: sys,
             pid,
@@ -360,8 +356,7 @@ impl ProcessHandle {
                 path,
                 self_pid,
                 child_uid,
-                stdin,
-                stdout,
+                (stdin, stdout),
                 cwd,
             )
         };
@@ -850,6 +845,7 @@ impl Drop for ActiveProcessHandle<'_> {
 mod tests {
 
     use super::*;
+    use crate::util::FilesystemId;
 
     // Can't run tests in parallel, as they all spawn processes from a new
     // System. When running the OS normally, there is exactly one System.
@@ -864,8 +860,11 @@ mod tests {
             "test".to_owned(),
             Pid(1),
             Uid(1),
-            None,
-            None,
+            (None, None),
+            InodeIdentifier {
+                filesystem_id: FilesystemId::Main,
+                number: 0,
+            },
         )
     }
 
