@@ -1,5 +1,5 @@
 use crate::util::{
-    DirectoryEntry, Fd, FilePermissions, FileStat, FileType, FilesystemId, InodeIdentifier,
+    DirectoryEntry, Fd, FilePermissions, FileStat, FileType, InodeIdentifier,
     OpenFileId, Pid, Uid,
 };
 use crate::vfs::VirtualFilesystemSwitch;
@@ -44,9 +44,10 @@ impl GlobalProcessTable {
         uid: Uid,
         stdin: Option<Arc<OpenFileId>>,
         stdout: Option<Arc<OpenFileId>>,
+        cwd: InodeIdentifier,
     ) -> Pid {
         let pid = self.next_pid;
-        let process = Process::new(pid, parent_pid, uid, process_name, stdin, stdout);
+        let process = Process::new(pid, parent_pid, uid, process_name, stdin, stdout, cwd);
         self.next_pid = Pid(self.next_pid.0 + 1);
         self.processes.insert(pid, process);
         pid
@@ -111,13 +112,8 @@ impl Process {
         name: String,
         stdin: Option<Arc<OpenFileId>>,
         stdout: Option<Arc<OpenFileId>>,
+        cwd: InodeIdentifier,
     ) -> Self {
-        //TODO don't rely on / having ino=0 everywhere
-        let cwd = InodeIdentifier {
-            filesystem_id: FilesystemId::Main,
-            number: 0,
-        };
-
         let mut next_fd = 0;
         let mut fds = HashMap::new();
         if let Some(stdin) = stdin {
@@ -259,8 +255,9 @@ impl System {
         uid: Uid,
         stdin: Option<Arc<OpenFileId>>,
         stdout: Option<Arc<OpenFileId>>,
+        cwd: InodeIdentifier,
     ) -> ProcessHandle {
-        let pid = processes.add(name, parent_pid, uid, stdin, stdout);
+        let pid = processes.add(name, parent_pid, uid, stdin, stdout, cwd);
         ProcessHandle {
             shared_sys: sys,
             pid,
@@ -356,8 +353,16 @@ impl ProcessHandle {
             };
             eprintln!("Spawning {}. Stdout={:?}, Uid={:?}", path, stdin, stdout,);
             eprintln!("Current proc open files: {:?}", current_proc.fds);
+            let cwd = current_proc.cwd;
             System::spawn_process(
-                processes, child_sys, path, self_pid, child_uid, stdin, stdout,
+                processes,
+                child_sys,
+                path,
+                self_pid,
+                child_uid,
+                stdin,
+                stdout,
+                cwd,
             )
         };
         let child_pid = child_handle.pid;

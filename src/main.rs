@@ -29,7 +29,8 @@ pub async fn main() {
 
     let init_pid = Pid(0);
     let mut vfs = VirtualFilesystemSwitch::new();
-    let devfs = DevFilesystem::new(vfs.root_inode_id(), init_pid);
+    let root_inode_id = vfs.root_inode_id();
+    let devfs = DevFilesystem::new(root_inode_id, init_pid);
     let terminal_input = devfs.kernel_terminal_input_writer();
     vfs.mount_filesystem("dev".to_owned(), devfs);
     tokio::task::spawn_blocking(move || run_terminal_handler(terminal_input));
@@ -48,6 +49,7 @@ pub async fn main() {
             Uid(0),
             None,
             None,
+            root_inode_id,
         );
         let liveness = Arc::clone(&liveness);
         tokio::task::spawn_blocking(move || run_init_proc(init_handle, liveness))
