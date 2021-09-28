@@ -15,6 +15,7 @@ type Result<T> = core::result::Result<T, String>;
 pub struct ShellProcess {
     background_processes: HashSet<Pid>,
     handle: ProcessHandle,
+    has_requested_exit: bool,
 }
 
 impl ShellProcess {
@@ -22,6 +23,7 @@ impl ShellProcess {
         Self {
             background_processes: Default::default(),
             handle,
+            has_requested_exit: false,
         }
     }
 
@@ -31,7 +33,7 @@ impl ShellProcess {
         let mut stdout = io::stdout();
 
         let mut buf = [0; 1024];
-        loop {
+        while !self.has_requested_exit {
             let current_dir_name = self
                 .handle
                 .sc_get_current_dir_name()
@@ -61,18 +63,21 @@ impl ShellProcess {
             };
             assert!(
                 n < buf.len(),
-                "We filled the buffer. We may havemissed some input"
+                "We filled the buffer. We may have missed some input"
             );
             let input = std::str::from_utf8(&buf[..n]).expect("UTF8 stdin");
 
-            self.handle(input.to_owned());
+            self.handle_input(input.to_owned());
         }
+
+        println!("Bye!");
+        self.handle.sc_exit(0);
     }
 
-    fn handle(&mut self, input: String) {
+    fn handle_input(&mut self, input: String) {
         let tokens: Vec<&str> = input.split_whitespace().collect();
         if !tokens.is_empty() {
-            if let Err(e) = self.handle_input(tokens) {
+            if let Err(e) = self.handle_tokenized_input(tokens) {
                 println!("Error: {}", e);
             }
         }
@@ -90,7 +95,7 @@ impl ShellProcess {
         }
     }
 
-    fn handle_input(&mut self, tokens: Vec<&str>) -> Result<()> {
+    fn handle_tokenized_input(&mut self, tokens: Vec<&str>) -> Result<()> {
         let mut tokens = &tokens[..];
         let run_in_background = match tokens {
             [head @ .., "&"] => {
@@ -146,6 +151,7 @@ impl ShellProcess {
             "jobs" => self.jobs(tokens),
             "pid" => self.pid(tokens),
             "echo" => self.echo(tokens),
+            "exit" => self.exit(tokens),
             _ => self.dynamic_program(tokens, run_in_background),
         }
     }
@@ -412,6 +418,11 @@ impl ShellProcess {
     fn echo(&mut self, args: &[&str]) -> Result<()> {
         let output = &args[1..].join(" ");
         self.stdoutln(output)?;
+        Ok(())
+    }
+
+    fn exit(&mut self, _args: &[&str]) -> Result<()> {
+        self.has_requested_exit = true;
         Ok(())
     }
 
