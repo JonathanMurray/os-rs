@@ -6,12 +6,12 @@ mod sys;
 mod util;
 mod vfs;
 
-use std::io::{self, Write};
+use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::devfs::DevFilesystem;
-use crate::shell::Shell;
+use crate::shell::ShellProcess;
 use crate::sys::{
     OpenFlags, ProcessHandle, SpawnAction, SpawnFds, SpawnUid, System, WaitPidOptions,
     WaitPidTarget, GLOBAL_PROCESS_TABLE,
@@ -272,44 +272,7 @@ fn run_background_proc(mut sys: ProcessHandle) {
     sys.sc_close(fd).expect("Close uptime file");
 }
 
-fn run_shell_proc(mut sys: ProcessHandle) {
-    let pid = sys.sc_getpid();
-    println!("Welcome!");
-    let mut stdout = io::stdout();
-    let mut sh = Shell::new();
-
-    let mut buf = [0; 1024];
-    loop {
-        let current_dir_name = sys.sc_get_current_dir_name().expect("Must have valid cwd");
-        eprintln!("{:?} printing prompt", pid);
-        print!("{}$ ", current_dir_name.as_str());
-        stdout.flush().unwrap();
-        let n = loop {
-            sys = if let Some(h) = sys.handle_signals() {
-                h
-            } else {
-                return;
-            };
-
-            match sys.sc_read(0, &mut buf) {
-                Ok(Some(n)) => break n,
-                Ok(None) => {
-                    // Would need to block to get input
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(e) => {
-                    println!("WARN: Shell failed to read stdin: {}", e);
-                    sys.sc_exit(1);
-                    return;
-                }
-            };
-        };
-        assert!(
-            n < buf.len(),
-            "We filled the buffer. We may havemissed some input"
-        );
-        let input = std::str::from_utf8(&buf[..n]).expect("UTF8 stdin");
-
-        sh.handle(&mut sys, input.to_owned());
-    }
+fn run_shell_proc(handle: ProcessHandle) {
+    let shell = ShellProcess::new(handle);
+    shell.run();
 }

@@ -3,35 +3,85 @@ use crate::sys::{
     WaitPidOptions, WaitPidTarget,
 };
 use crate::util::{FilePermissions, FileStat, FileType, Pid};
+
 use std::collections::HashSet;
 use std::fmt::Display;
+use std::io::{self, Write};
 use std::str::FromStr;
+use std::time::Duration;
 
 type Result<T> = core::result::Result<T, String>;
 
-pub struct Shell {
+pub struct ShellProcess {
     background_processes: HashSet<Pid>,
+    handle: ProcessHandle,
 }
 
-impl Shell {
-    pub fn new() -> Self {
+impl ShellProcess {
+    pub fn new(handle: ProcessHandle) -> Self {
         Self {
             background_processes: Default::default(),
+            handle,
         }
     }
 
-    pub fn handle(&mut self, handle: &mut ProcessHandle, input: String) {
+    pub fn run(mut self) {
+        let pid = self.handle.sc_getpid();
+        println!("Welcome!");
+        let mut stdout = io::stdout();
+
+        let mut buf = [0; 1024];
+        loop {
+            let current_dir_name = self
+                .handle
+                .sc_get_current_dir_name()
+                .expect("Must have valid cwd");
+            eprintln!("{:?} printing prompt", pid);
+            print!("{}$ ", current_dir_name.as_str());
+            stdout.flush().unwrap();
+            let n = loop {
+                self.handle = if let Some(h) = self.handle.handle_signals() {
+                    h
+                } else {
+                    return;
+                };
+
+                match self.handle.sc_read(0, &mut buf) {
+                    Ok(Some(n)) => break n,
+                    Ok(None) => {
+                        // Would need to block to get input
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(e) => {
+                        println!("WARN: Shell failed to read stdin: {}", e);
+                        self.handle.sc_exit(1);
+                        return;
+                    }
+                };
+            };
+            assert!(
+                n < buf.len(),
+                "We filled the buffer. We may havemissed some input"
+            );
+            let input = std::str::from_utf8(&buf[..n]).expect("UTF8 stdin");
+
+            self.handle(input.to_owned());
+        }
+    }
+
+    fn handle(&mut self, input: String) {
         let tokens: Vec<&str> = input.split_whitespace().collect();
         if !tokens.is_empty() {
-            if let Err(e) = self.handle_input(handle, tokens) {
+            if let Err(e) = self.handle_input(tokens) {
                 println!("Error: {}", e);
             }
         }
-        self.check_finished_background_tasks(handle);
+        self.check_finished_background_tasks();
     }
 
-    fn check_finished_background_tasks(&mut self, handle: &mut ProcessHandle) {
-        while let Some((pid, result)) = handle
+    fn check_finished_background_tasks(&mut self) {
+        while let Some((pid, result)) = self
+            .handle
             .sc_wait_pid(WaitPidTarget::AnyChild, WaitPidOptions::NoHang)
             .expect("Wait for background tasks")
         {
@@ -40,7 +90,7 @@ impl Shell {
         }
     }
 
-    fn handle_input(&mut self, handle: &mut ProcessHandle, tokens: Vec<&str>) -> Result<()> {
+    fn handle_input(&mut self, tokens: Vec<&str>) -> Result<()> {
         let mut tokens = &tokens[..];
         let run_in_background = match tokens {
             [head @ .., "&"] => {
@@ -60,55 +110,51 @@ impl Shell {
 
         match redirect {
             Some(&f) => {
-                let saved_stdout_fd = handle.sc_dup(1)?;
-                let file_fd = handle.sc_open(
+                let saved_stdout_fd = self.handle.sc_dup(1)?;
+                let file_fd = self.handle.sc_open(
                     f,
                     OpenFlags::CREATE | OpenFlags::TRUNCATE,
                     Some(FilePermissions::ReadWrite),
                 )?;
-                handle.sc_dup2(file_fd, 1)?; // redirect stdout to file
-                handle.sc_close(file_fd)?;
+                self.handle.sc_dup2(file_fd, 1)?; // redirect stdout to file
+                self.handle.sc_close(file_fd)?;
 
-                self.execute_command(tokens, handle, run_in_background)?;
+                self.execute_command(tokens, run_in_background)?;
 
-                handle.sc_dup2(saved_stdout_fd, 1)?; // restore stdout
-                handle.sc_close(saved_stdout_fd)
+                self.handle.sc_dup2(saved_stdout_fd, 1)?; // restore stdout
+                self.handle.sc_close(saved_stdout_fd)
             }
-            None => self.execute_command(tokens, handle, run_in_background),
+            None => self.execute_command(tokens, run_in_background),
         }
     }
 
-    fn execute_command(
-        &mut self,
-        tokens: &[&str],
-        handle: &mut ProcessHandle,
-        run_in_background: bool,
-    ) -> Result<()> {
+    fn execute_command(&mut self, tokens: &[&str], run_in_background: bool) -> Result<()> {
         let command = tokens[0];
         match command {
-            "stat" => self.stat(tokens, handle),
-            "cat" => self.cat(tokens, handle),
-            "ls" => self.ls(tokens, handle),
-            "ll" => self.ll(tokens, handle),
-            "touch" => self.touch(tokens, handle),
-            "mkdir" => self.mkdir(tokens, handle),
-            "rm" => self.rm(tokens, handle),
-            "mv" => self.mv(tokens, handle),
-            "cd" => self.cd(tokens, handle),
-            "help" => self.help(tokens, handle),
-            "kill" => self.kill(tokens, handle),
-            "ps" => self.ps(tokens, handle),
-            "jobs" => self.jobs(tokens, handle),
-            "pid" => self.pid(tokens, handle),
-            "echo" => self.echo(tokens, handle),
-            _ => self.dynamic_program(tokens, handle, run_in_background),
+            "stat" => self.stat(tokens),
+            "cat" => self.cat(tokens),
+            "ls" => self.ls(tokens),
+            "ll" => self.ll(tokens),
+            "touch" => self.touch(tokens),
+            "mkdir" => self.mkdir(tokens),
+            "rm" => self.rm(tokens),
+            "mv" => self.mv(tokens),
+            "cd" => self.cd(tokens),
+            "help" => self.help(tokens),
+            "kill" => self.kill(tokens),
+            "ps" => self.ps(tokens),
+            "jobs" => self.jobs(tokens),
+            "pid" => self.pid(tokens),
+            "echo" => self.echo(tokens),
+            _ => self.dynamic_program(tokens, run_in_background),
         }
     }
 
-    fn stat(&mut self, args: &[&str], sys: &mut ProcessHandle) -> Result<()> {
+    fn stat(&mut self, args: &[&str]) -> Result<()> {
         let path = args.get(1).ok_or("missing arg")?;
-        let stat = sys.sc_stat(path)?;
-        stdoutln(sys, self._stat_line(stat))?;
+        let stat = self.handle.sc_stat(path)?;
+        let output = self._stat_line(stat);
+        self.stdoutln(output)?;
         Ok(())
     }
 
@@ -138,23 +184,23 @@ impl Shell {
         )
     }
 
-    fn cat(&mut self, args: &[&str], sys: &mut ProcessHandle) -> Result<()> {
+    fn cat(&mut self, args: &[&str]) -> Result<()> {
         let path = args.get(1).ok_or_else(|| "missing arg".to_owned())?;
-        self._cat_file(path, sys)
+        self._cat_file(path)
     }
 
-    fn _cat_file(&self, path: &str, sys: &mut ProcessHandle) -> Result<()> {
-        let fd = sys.sc_open(path, OpenFlags::empty(), None)?;
+    fn _cat_file(&mut self, path: &str) -> Result<()> {
+        let fd = self.handle.sc_open(path, OpenFlags::empty(), None)?;
         let mut buf = vec![0; 1024];
         loop {
-            let n = match sys.sc_read(fd, &mut buf) {
+            let n = match self.handle.sc_read(fd, &mut buf) {
                 Ok(Some(n)) => n,
                 Ok(None) => {
                     println!("WARN: Reading this would block.");
                     0
                 }
                 Err(e) => {
-                    if let Err(e) = sys.sc_close(fd) {
+                    if let Err(e) = self.handle.sc_close(fd) {
                         println!("WARN: Failed to close after failing to read: {}", e);
                     }
                     return Err(e);
@@ -162,146 +208,152 @@ impl Shell {
             };
             if n > 0 {
                 let s = String::from_utf8_lossy(&buf[..n]);
-                stdout(sys, s)?;
+                self.stdout(s)?;
             } else {
                 break;
             }
         }
-        sys.sc_close(fd)
+        self.handle.sc_close(fd)
     }
 
-    fn ls(&mut self, args: &[&str], sys: &mut ProcessHandle) -> Result<()> {
+    fn ls(&mut self, args: &[&str]) -> Result<()> {
         let path: &str = args.get(1).unwrap_or(&".");
-        let stat = sys.sc_stat(path)?;
+        let stat = self.handle.sc_stat(path)?;
         if stat.file_type == FileType::Regular {
-            stdoutln(sys, path)?;
+            self.stdoutln(path)?;
         } else {
-            let dir_fd = sys.sc_open(path, OpenFlags::empty(), None).unwrap();
-            let dir_entries = sys.sc_getdents(dir_fd)?;
+            let dir_fd = self.handle.sc_open(path, OpenFlags::empty(), None).unwrap();
+            let dir_entries = self.handle.sc_getdents(dir_fd)?;
             let names: Vec<String> = dir_entries.into_iter().map(|e| e.name).collect();
-            stdoutln(sys, names.join("\t\t"))?;
-            sys.sc_close(dir_fd)?;
+            self.stdoutln(names.join("\t\t"))?;
+            self.handle.sc_close(dir_fd)?;
         }
         Ok(())
     }
 
-    fn ll(&mut self, args: &[&str], sys: &mut ProcessHandle) -> Result<()> {
+    fn ll(&mut self, args: &[&str]) -> Result<()> {
         let path: &str = args.get(1).unwrap_or(&".");
-        let stat = sys.sc_stat(path)?;
+        let stat = self.handle.sc_stat(path)?;
         if stat.file_type == FileType::Regular {
             let output = format!("{}{:>10}", self._stat_line(stat), path);
-            stdoutln(sys, output)?;
+            self.stdoutln(output)?;
         } else {
-            let dir_fd = sys.sc_open(path, OpenFlags::empty(), None)?;
-            let dir_entries = sys.sc_getdents(dir_fd)?;
+            let dir_fd = self.handle.sc_open(path, OpenFlags::empty(), None)?;
+            let dir_entries = self.handle.sc_getdents(dir_fd)?;
             for dir_entry in dir_entries {
                 let child_name = dir_entry.name;
                 let child_path = format!("{}/{}", path, child_name);
-                let stat = sys.sc_stat(&child_path)?;
+                let stat = self.handle.sc_stat(&child_path)?;
                 let output = format!("{:<44}{}", self._stat_line(stat), child_name);
 
-                stdoutln(sys, output)?;
+                self.stdoutln(output)?;
             }
-            sys.sc_close(dir_fd)?;
+            self.handle.sc_close(dir_fd)?;
         }
         Ok(())
     }
 
-    fn touch(&mut self, args: &[&str], sys: &mut ProcessHandle) -> Result<()> {
+    fn touch(&mut self, args: &[&str]) -> Result<()> {
         let path = args.get(1).ok_or_else(|| "missing arg".to_owned())?;
-        sys.sc_create(*path, FileType::Regular, FilePermissions::ReadWrite)?;
-        stdoutln(sys, "File created")?;
+        self.handle
+            .sc_create(*path, FileType::Regular, FilePermissions::ReadWrite)?;
+        self.stdoutln("File created")?;
         Ok(())
     }
 
-    fn mkdir(&mut self, args: &[&str], sys: &mut ProcessHandle) -> Result<()> {
+    fn mkdir(&mut self, args: &[&str]) -> Result<()> {
         let path = args.get(1).ok_or_else(|| "missing arg".to_owned())?;
-        sys.sc_create(*path, FileType::Directory, FilePermissions::ReadWrite)?;
-        stdoutln(sys, "Directory created")?;
+        self.handle
+            .sc_create(*path, FileType::Directory, FilePermissions::ReadWrite)?;
+        self.stdoutln("Directory created")?;
         Ok(())
     }
 
     /// builtin
-    fn cd(&mut self, args: &[&str], sys: &mut ProcessHandle) -> Result<()> {
+    fn cd(&mut self, args: &[&str]) -> Result<()> {
         if let Some(&path) = args.get(1) {
-            sys.sc_chdir(path)
+            self.handle.sc_chdir(path)
         } else {
-            sys.sc_chdir("/")
+            self.handle.sc_chdir("/")
         }
     }
 
-    fn rm(&mut self, args: &[&str], sys: &mut ProcessHandle) -> Result<()> {
+    fn rm(&mut self, args: &[&str]) -> Result<()> {
         let path = args.get(1).ok_or_else(|| "missing arg".to_owned())?;
-        sys.sc_unlink(path)?;
-        stdoutln(sys, "File removed")?;
+        self.handle.sc_unlink(path)?;
+        self.stdoutln("File removed")?;
         Ok(())
     }
 
-    fn mv(&mut self, args: &[&str], sys: &mut ProcessHandle) -> Result<()> {
+    fn mv(&mut self, args: &[&str]) -> Result<()> {
         if let (Some(&src_path), Some(&dst_path)) = (args.get(1), args.get(2)) {
-            sys.sc_rename(src_path, dst_path)?;
-            stdoutln(sys, "File moved")?;
+            self.handle.sc_rename(src_path, dst_path)?;
+            self.stdoutln("File moved")?;
             Ok(())
         } else {
             Err("Error: missing arg(s)".to_owned())
         }
     }
 
-    fn help(&mut self, _args: &[&str], sys: &mut ProcessHandle) -> Result<()> {
-        self._cat_file("/README", sys)
+    fn help(&mut self, _args: &[&str]) -> Result<()> {
+        self._cat_file("/README")
     }
 
-    fn kill(&mut self, args: &[&str], sys: &mut ProcessHandle) -> Result<()> {
+    fn kill(&mut self, args: &[&str]) -> Result<()> {
         let pid = args.get(1).ok_or_else(|| "missing arg".to_owned())?;
         let pid = u32::from_str(*pid).map_err(|_| "Not a valid pid".to_owned())?;
         let pid = Pid(pid);
-        sys.sc_kill(pid)
+        self.handle.sc_kill(pid)
     }
 
-    fn dynamic_program(
-        &mut self,
-        args: &[&str],
-        handle: &mut ProcessHandle,
-        run_in_background: bool,
-    ) -> Result<()> {
+    fn dynamic_program(&mut self, args: &[&str], run_in_background: bool) -> Result<()> {
         let path = format!("/bin/{}", args[0]);
 
         if run_in_background {
-            let child_pid = handle.sc_spawn(path, SpawnFds::Inherit, SpawnUid::Inherit, None)?;
+            let child_pid =
+                self.handle
+                    .sc_spawn(path, SpawnFds::Inherit, SpawnUid::Inherit, None)?;
             println!("[{}] running in background...", child_pid.0);
             self.background_processes.insert(child_pid);
         } else {
-            let terminal_fd = handle.sc_open("/dev/terminal", OpenFlags::empty(), None)?;
-            let child_pid = handle.sc_spawn(
+            let terminal_fd = self
+                .handle
+                .sc_open("/dev/terminal", OpenFlags::empty(), None)?;
+            let child_pid = self.handle.sc_spawn(
                 path,
                 SpawnFds::Inherit,
                 SpawnUid::Inherit,
                 Some(SpawnAction::ClaimTerminal(terminal_fd)),
             )?;
 
-            let result =
-                handle.sc_wait_pid(WaitPidTarget::Pid(child_pid), WaitPidOptions::Default)?;
+            let result = self
+                .handle
+                .sc_wait_pid(WaitPidTarget::Pid(child_pid), WaitPidOptions::Default)?;
             match result.unwrap() {
                 (_, ProcessResult::ExitCode(0)) => {}
                 (child_pid, bad_result) => {
                     println!("[{}]: {:?}", child_pid.0, bad_result);
                 }
             }
-            let pid = handle.sc_getpid();
-            handle.sc_ioctl(terminal_fd, IoctlRequest::SetTerminalForegroundProcess(pid))?;
-            handle.sc_close(terminal_fd)?;
+            let pid = self.handle.sc_getpid();
+            self.handle
+                .sc_ioctl(terminal_fd, IoctlRequest::SetTerminalForegroundProcess(pid))?;
+            self.handle.sc_close(terminal_fd)?;
         }
 
         Ok(())
     }
 
-    fn ps(&mut self, _args: &[&str], handle: &mut ProcessHandle) -> Result<()> {
-        let fd = handle.sc_open("/proc/status", OpenFlags::empty(), None)?;
+    fn ps(&mut self, _args: &[&str]) -> Result<()> {
+        let fd = self
+            .handle
+            .sc_open("/proc/status", OpenFlags::empty(), None)?;
 
         //TODO read arbitrarily large file
         let mut buf = vec![0; 2048];
         //TODO if reading fails, we leak the FD
-        let n_read = handle
+        let n_read = self
+            .handle
             .sc_read(fd, &mut buf)?
             .expect("shouldn't need to block on proc");
 
@@ -320,59 +372,62 @@ impl Shell {
             "{:>4}{:>4}{:>8}  {:<10}{:>4}  NAME",
             "UID", "PID", "PARENT", "STATE", "FDs"
         );
-        stdoutln(handle, output)?;
+        self.stdoutln(output)?;
         for line in lines {
             let tokens: Vec<&str> = line.split(' ').collect();
             let output = format!(
                 "{:>4}{:>4}{:>8}  {:<10}{:>4}  {}",
                 tokens[4], tokens[0], tokens[1], tokens[3], tokens[5], tokens[2]
             );
-            stdoutln(handle, output)?;
+            self.stdoutln(output)?;
         }
 
-        handle.sc_close(fd)?;
+        self.handle.sc_close(fd)?;
 
         Ok(())
     }
 
     /// builtin
-    fn jobs(&mut self, _args: &[&str], handle: &mut ProcessHandle) -> Result<()> {
-        self.check_finished_background_tasks(handle);
+    fn jobs(&mut self, _args: &[&str]) -> Result<()> {
+        self.check_finished_background_tasks();
 
-        if !self.background_processes.is_empty() {
-            for pid in self.background_processes.iter() {
-                let output = format!("[{}] Running", pid.0);
-                stdoutln(handle, output)?;
-            }
+        let messages: Vec<String> = self
+            .background_processes
+            .iter()
+            .map(|pid| format!("[{}] Running", pid.0))
+            .collect();
+
+        for msg in messages {
+            self.stdoutln(msg)?;
         }
         Ok(())
     }
 
-    fn pid(&mut self, _args: &[&str], handle: &mut ProcessHandle) -> Result<()> {
-        let pid = handle.sc_getpid();
-        stdoutln(handle, pid.0)?;
+    fn pid(&mut self, _args: &[&str]) -> Result<()> {
+        let pid = self.handle.sc_getpid();
+        self.stdoutln(pid.0)?;
         Ok(())
     }
 
-    fn echo(&mut self, args: &[&str], handle: &mut ProcessHandle) -> Result<()> {
+    fn echo(&mut self, args: &[&str]) -> Result<()> {
         let output = &args[1..].join(" ");
-        stdoutln(handle, output)?;
+        self.stdoutln(output)?;
         Ok(())
     }
-}
 
-fn stdoutln(handle: &mut ProcessHandle, s: impl Display) -> Result<()> {
-    let output = format!("{}\n", s);
-    stdout(handle, output)
-}
+    fn stdoutln(&mut self, s: impl Display) -> Result<()> {
+        let output = format!("{}\n", s);
+        self.stdout(output)
+    }
 
-fn stdout(handle: &mut ProcessHandle, s: impl Display) -> Result<()> {
-    let output = format!("{}", s);
-    let n_written = handle.sc_write(1, output.as_bytes())?;
-    assert_eq!(
-        n_written,
-        output.len(),
-        "We didn't write all the output to stdout"
-    );
-    Ok(())
+    fn stdout(&mut self, s: impl Display) -> Result<()> {
+        let output = format!("{}", s);
+        let n_written = self.handle.sc_write(1, output.as_bytes())?;
+        assert_eq!(
+            n_written,
+            output.len(),
+            "We didn't write all the output to stdout"
+        );
+        Ok(())
+    }
 }
