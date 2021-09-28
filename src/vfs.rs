@@ -1,16 +1,19 @@
-use crate::devfs::DevFilesystem;
 use crate::procfs::ProcFilesystem;
 use crate::regularfs::RegularFilesystem;
+use crate::sys::{IoctlRequest, OpenFlags};
 use crate::util::{
     DirectoryEntry, FilePermissions, FileStat, FileType, FilesystemId, Ino, Inode, InodeIdentifier,
-    OpenFileId, Pid,
+    OpenFileId,
 };
 use std::collections::{hash_map::Entry, HashMap};
+use std::sync::{Arc, Weak};
 
 type Result<T> = core::result::Result<T, String>;
 
 pub trait Filesystem: std::fmt::Debug + Send {
     fn root_inode_id(&self) -> InodeIdentifier;
+
+    fn ioctl(&mut self, inode_number: Ino, req: IoctlRequest) -> Result<()>;
 
     fn create(
         &mut self,
@@ -18,6 +21,8 @@ pub trait Filesystem: std::fmt::Debug + Send {
         file_type: FileType,
         permissions: FilePermissions,
     ) -> Result<Ino>;
+
+    fn truncate(&mut self, inode_number: Ino) -> Result<()>;
 
     fn remove(&mut self, inode_number: Ino) -> Result<()>;
 
@@ -47,7 +52,7 @@ pub trait Filesystem: std::fmt::Debug + Send {
         id: OpenFileId,
         buf: &mut [u8],
         file_offset: usize,
-    ) -> Result<usize>;
+    ) -> Result<Option<usize>>;
 
     fn write(&mut self, inode_number: Ino, buf: &[u8], file_offset: usize) -> Result<usize>;
 }
@@ -57,7 +62,8 @@ pub trait Filesystem: std::fmt::Debug + Send {
 struct OpenFile {
     inode_id: InodeIdentifier,
     offset: usize,
-    owner: Pid,
+    // Tracks whether any FD refers to this file (meaning we can't remove it)
+    fd_references: Weak<OpenFileId>,
 }
 
 #[derive(Debug)]
@@ -72,7 +78,6 @@ impl VirtualFilesystemSwitch {
         let mut mainfs = RegularFilesystem::new();
         let root_inode_id = mainfs.root_inode_id();
         let procfs = ProcFilesystem::new(root_inode_id);
-        let devfs = DevFilesystem::new(root_inode_id);
         mainfs
             .add_directory_entry(
                 root_inode_id.number,
@@ -80,18 +85,9 @@ impl VirtualFilesystemSwitch {
                 procfs.root_inode_id(),
             )
             .expect("Add proc to root dir");
-        mainfs
-            .add_directory_entry(
-                root_inode_id.number,
-                "dev".to_owned(),
-                devfs.root_inode_id(),
-            )
-            .expect("Add dev to root dir");
-
         let mut fs: HashMap<FilesystemId, Box<dyn Filesystem>> = HashMap::new();
         fs.insert(FilesystemId::Main, Box::new(mainfs));
         fs.insert(FilesystemId::Proc, Box::new(procfs));
-        fs.insert(FilesystemId::Dev, Box::new(devfs));
 
         Self {
             fs,
@@ -100,13 +96,27 @@ impl VirtualFilesystemSwitch {
         }
     }
 
+    pub fn root_inode_id(&self) -> InodeIdentifier {
+        let mainfs = self.fs.get(&FilesystemId::Main).unwrap();
+        mainfs.root_inode_id()
+    }
+
+    pub fn mount_filesystem(&mut self, name: String, filesystem: impl Filesystem + 'static) {
+        let mainfs = self.fs.get_mut(&FilesystemId::Main).unwrap();
+        let root_inode_id = mainfs.root_inode_id();
+        mainfs
+            .add_directory_entry(root_inode_id.number, name, filesystem.root_inode_id())
+            .expect("Add dev to root dir");
+
+        self.fs.insert(FilesystemId::Dev, Box::new(filesystem));
+    }
+
     pub fn create_file<S: Into<String>>(
         &mut self,
         path: S,
         file_type: FileType,
         permissions: FilePermissions,
         cwd: InodeIdentifier,
-        filesystem_id: Option<FilesystemId>,
     ) -> Result<()> {
         let path = path.into();
         let parts: Vec<&str> = path.split('/').collect();
@@ -128,7 +138,7 @@ impl VirtualFilesystemSwitch {
             return Err("File already exists".to_owned());
         }
 
-        self._create_file(parent_id, file_type, permissions, filesystem_id, name)
+        self._create_file(parent_id, file_type, permissions, name)
     }
 
     fn _create_file(
@@ -136,11 +146,9 @@ impl VirtualFilesystemSwitch {
         parent_inode_id: InodeIdentifier,
         file_type: FileType,
         permissions: FilePermissions,
-        filesystem_id: Option<FilesystemId>,
         name: String,
     ) -> Result<()> {
-        // file can be on different filesystem than its parent, for example /proc
-        let filesystem_id = filesystem_id.unwrap_or(parent_inode_id.filesystem_id);
+        let filesystem_id = parent_inode_id.filesystem_id;
 
         let fs = self.fs.get_mut(&filesystem_id).unwrap();
         let new_ino = fs.create(parent_inode_id, file_type, permissions)?;
@@ -245,18 +253,43 @@ impl VirtualFilesystemSwitch {
         fs.directory_entries(inode_id.number)
     }
 
-    pub fn open_file(&mut self, path: &str, cwd: InodeIdentifier, pid: Pid) -> Result<OpenFileId> {
+    pub fn open_file(
+        &mut self,
+        path: &str,
+        cwd: InodeIdentifier,
+        flags: OpenFlags,
+        creation_file_permissions: Option<FilePermissions>,
+    ) -> Result<Arc<OpenFileId>> {
         let parts: Vec<&str> = path.split('/').collect();
-        let inode = self.resolve_from_parts(&parts, cwd)?;
+        let inode = match self.resolve_from_parts(&parts, cwd) {
+            Ok(inode) => inode,
+            Err(_) if flags.contains(OpenFlags::CREATE) => {
+                //FUTURE: this is all very inefficient. We should take better care
+                //not to redo path resolves
+                let permissions =
+                    creation_file_permissions.expect("Need file permissions to create file");
+                self.create_file(path, FileType::Regular, permissions, cwd)?;
+                self.resolve_from_parts(&parts, cwd)
+                    .expect("must exist now")
+            }
+            Err(e) => return Err(e),
+        };
+
         let inode_id = inode.id;
 
+        if flags.contains(OpenFlags::TRUNCATE) && inode.file_type != FileType::CharacterDevice {
+            let fs = self.fs.get_mut(&inode_id.filesystem_id).unwrap();
+            fs.truncate(inode_id.number)?;
+        }
+
         let open_file_id = self.next_open_file_id;
+        let fd_reference = Arc::new(open_file_id);
         self.open_files.insert(
             open_file_id,
             OpenFile {
                 inode_id,
                 offset: 0,
-                owner: pid,
+                fd_references: Arc::downgrade(&fd_reference),
             },
         );
         self.next_open_file_id = OpenFileId(self.next_open_file_id.0 + 1);
@@ -266,19 +299,21 @@ impl VirtualFilesystemSwitch {
         //TODO do we need to delegate this, or is it enough that the
         //VFS keeps track of open files?
         fs.open(inode_id.number, open_file_id)?;
-        Ok(open_file_id)
+        Ok(fd_reference)
     }
 
-    pub fn close_file(&mut self, id: OpenFileId, pid: Pid) -> Result<()> {
+    pub fn close_file(&mut self, id: Arc<OpenFileId>) -> Result<()> {
+        let id = *id.as_ref(); // this releases the reference
         match self.open_files.entry(id) {
             Entry::Occupied(e) => {
                 let open_file = e.get();
-                if open_file.owner == pid {
+                let some_fd_remains = open_file.fd_references.upgrade().is_some();
+                if some_fd_remains {
+                    Ok(())
+                } else {
                     let fs = self.fs.get_mut(&open_file.inode_id.filesystem_id).unwrap();
                     e.remove();
                     fs.close(id)
-                } else {
-                    Ok(())
                 }
             }
             Entry::Vacant(_) => Err("No such open file".to_owned()),
@@ -291,18 +326,30 @@ impl VirtualFilesystemSwitch {
             .ok_or(format!("No open file found for id: {:?}", id))
     }
 
-    pub fn read_file(&mut self, open_file_id: OpenFileId, buf: &mut [u8]) -> Result<usize> {
+    pub fn ioctl(&mut self, open_file_id: OpenFileId, req: IoctlRequest) -> Result<()> {
+        let inode_id = self.get_open_file_mut(open_file_id)?.inode_id;
+        let inode_number = inode_id.number;
+
+        let fs = self.fs.get_mut(&inode_id.filesystem_id).unwrap();
+        fs.ioctl(inode_number, req)
+    }
+
+    pub fn read_file(&mut self, open_file_id: OpenFileId, buf: &mut [u8]) -> Result<Option<usize>> {
         let (inode_id, offset) = {
             let open_file = self.get_open_file_mut(open_file_id)?;
             (open_file.inode_id, open_file.offset)
         };
 
         let fs = self.fs.get_mut(&inode_id.filesystem_id).unwrap();
-        let n_read = fs.read(inode_id.number, open_file_id, buf, offset)?;
+        let n_read = match fs.read(inode_id.number, open_file_id, buf, offset)? {
+            Some(n) => n,
+            // Would need to block
+            None => return Ok(None),
+        };
 
         let open_file = self.get_open_file_mut(open_file_id)?;
         open_file.offset += n_read;
-        Ok(n_read)
+        Ok(Some(n_read))
     }
 
     pub fn write_file(&mut self, open_file_id: OpenFileId, buf: &[u8]) -> Result<usize> {

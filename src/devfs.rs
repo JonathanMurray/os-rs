@@ -1,8 +1,12 @@
+use crate::sys::{IoctlRequest, GLOBAL_PROCESS_TABLE};
 use crate::util::{
     DirectoryEntry, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier,
-    OpenFileId,
+    OpenFileId, Pid,
 };
 use crate::vfs::Filesystem;
+
+use std::io::{Cursor, Read};
+use std::sync::{Arc, Mutex};
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -12,7 +16,9 @@ pub struct DevFilesystem {
     root_inode: Inode,
     log_inode: Inode,
     null_inode: Inode,
-    output_inode: Inode,
+    terminal_inode: Inode,
+    terminal_input: Arc<Mutex<Vec<u8>>>,
+    terminal_foreground_pid: Pid,
 }
 
 //TODO Instead of tracking each individual inode in every
@@ -20,7 +26,7 @@ pub struct DevFilesystem {
 //encapsulate the behaviour of a specific device?
 
 impl DevFilesystem {
-    pub fn new(parent_inode_id: InodeIdentifier) -> Self {
+    pub fn new(parent_inode_id: InodeIdentifier, terminal_foreground_pid: Pid) -> Self {
         let root_inode = Inode {
             id: InodeIdentifier {
                 filesystem_id: FilesystemId::Dev,
@@ -51,7 +57,7 @@ impl DevFilesystem {
             size: 0,
             permissions: FilePermissions::ReadWrite,
         };
-        let output_inode = Inode {
+        let terminal_inode = Inode {
             id: InodeIdentifier {
                 filesystem_id: FilesystemId::Dev,
                 number: 3,
@@ -67,14 +73,32 @@ impl DevFilesystem {
             root_inode,
             log_inode,
             null_inode,
-            output_inode,
+            terminal_inode,
+            terminal_input: Arc::new(Mutex::new(Default::default())),
+            terminal_foreground_pid,
         }
+    }
+
+    pub fn kernel_terminal_input_writer(&self) -> Arc<Mutex<Vec<u8>>> {
+        Arc::clone(&self.terminal_input)
     }
 }
 
 impl Filesystem for DevFilesystem {
     fn root_inode_id(&self) -> InodeIdentifier {
         self.root_inode.id
+    }
+
+    fn ioctl(&mut self, inode_number: Ino, req: IoctlRequest) -> Result<()> {
+        match req {
+            IoctlRequest::SetTerminalForegroundProcess(pid) => match inode_number {
+                3 => {
+                    self.terminal_foreground_pid = pid;
+                    Ok(())
+                }
+                _ => Err("Fd does not support ioctl".to_owned()),
+            },
+        }
     }
 
     fn create(
@@ -86,6 +110,10 @@ impl Filesystem for DevFilesystem {
         Err("Can't create file on devfs".to_owned())
     }
 
+    fn truncate(&mut self, _inode_number: Ino) -> Result<()> {
+        Err("Can't truncate file on devfs".to_owned())
+    }
+
     fn remove(&mut self, _inode_number: Ino) -> Result<()> {
         Err("Can't remove file on devfs".to_owned())
     }
@@ -95,7 +123,7 @@ impl Filesystem for DevFilesystem {
             0 => Ok(self.root_inode),
             1 => Ok(self.log_inode),
             2 => Ok(self.null_inode),
-            3 => Ok(self.output_inode),
+            3 => Ok(self.terminal_inode),
             _ => Err("No such inode on devfs".to_owned()),
         }
     }
@@ -125,8 +153,8 @@ impl Filesystem for DevFilesystem {
                     inode_id: self.null_inode.id,
                 },
                 DirectoryEntry {
-                    name: "output".to_owned(),
-                    inode_id: self.output_inode.id,
+                    name: "terminal".to_owned(),
+                    inode_id: self.terminal_inode.id,
                 },
             ]),
             1 => Err("Not a directory".to_owned()),
@@ -158,14 +186,38 @@ impl Filesystem for DevFilesystem {
         &mut self,
         inode_number: Ino,
         _id: OpenFileId,
-        _buf: &mut [u8],
+        buf: &mut [u8],
         _file_offset: usize,
-    ) -> Result<usize> {
+    ) -> Result<Option<usize>> {
         match inode_number {
             0 => Err("Can't read directory".to_owned()),
-            1 => Ok(0),
-            2 => Ok(0),
-            3 => Ok(0),
+            1 => Ok(Some(0)),
+            2 => Ok(Some(0)),
+            3 => {
+                let mut processes = GLOBAL_PROCESS_TABLE.lock().unwrap();
+                if processes.current().pid == self.terminal_foreground_pid {
+                    let mut terminal_input = self.terminal_input.lock().unwrap();
+                    let mut cursor = Cursor::new(&terminal_input[..]);
+                    let n = cursor
+                        .read(buf)
+                        .map_err(|e| format!("Failed to read: {}", e))?;
+                    terminal_input.drain(0..n);
+                    if n > 0 {
+                        Ok(Some(n))
+                    } else {
+                        //TODO: should we use async processes instead and return a Future
+                        //here that triggers / wakes up when the kernel puts more data
+                        // on stdin?
+
+                        //Indicates that we'd need to block to receive data
+                        Ok(None)
+                    }
+                } else {
+                    // The reader is not the terminal's foreground process.
+                    // We return None to block it from reading.
+                    Ok(None)
+                }
+            }
             _ => Err("No such file".to_owned()),
         }
     }

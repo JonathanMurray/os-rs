@@ -3,7 +3,10 @@ use crate::util::{
     OpenFileId, Pid, Uid,
 };
 use crate::vfs::VirtualFilesystemSwitch;
+
+use bitflags::bitflags;
 use once_cell::sync::Lazy;
+
 use std::collections::{HashMap, LinkedList};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -39,10 +42,11 @@ impl GlobalProcessTable {
         process_name: String,
         parent_pid: Pid,
         uid: Uid,
-        stdout: Option<OpenFileId>,
+        stdin: Option<Arc<OpenFileId>>,
+        stdout: Option<Arc<OpenFileId>>,
     ) -> Pid {
         let pid = self.next_pid;
-        let process = Process::new(pid, parent_pid, uid, process_name, stdout);
+        let process = Process::new(pid, parent_pid, uid, process_name, stdin, stdout);
         self.next_pid = Pid(self.next_pid.0 + 1);
         self.processes.insert(pid, process);
         pid
@@ -90,7 +94,7 @@ pub struct Process {
     pub parent_pid: Pid,
     pub uid: Uid,
     pub name: String,
-    pub fds: HashMap<Fd, OpenFileId>,
+    pub fds: HashMap<Fd, Arc<OpenFileId>>,
     next_fd: Fd,
     cwd: InodeIdentifier,
     pub log: Vec<String>,
@@ -100,18 +104,29 @@ pub struct Process {
 }
 
 impl Process {
-    fn new(pid: Pid, parent_pid: Pid, uid: Uid, name: String, stdout: Option<OpenFileId>) -> Self {
+    fn new(
+        pid: Pid,
+        parent_pid: Pid,
+        uid: Uid,
+        name: String,
+        stdin: Option<Arc<OpenFileId>>,
+        stdout: Option<Arc<OpenFileId>>,
+    ) -> Self {
         //TODO don't rely on / having ino=0 everywhere
         let cwd = InodeIdentifier {
             filesystem_id: FilesystemId::Main,
             number: 0,
         };
 
-        let mut next_fd = 1;
+        let mut next_fd = 0;
         let mut fds = HashMap::new();
+        if let Some(stdin) = stdin {
+            fds.insert(next_fd, stdin);
+            next_fd += 1;
+        }
         if let Some(stdout) = stdout {
             fds.insert(next_fd, stdout);
-            next_fd = 2;
+            next_fd += 1;
         }
 
         Process {
@@ -129,20 +144,56 @@ impl Process {
         }
     }
 
+    fn duplicate_fd(&mut self, old_fd: Fd) -> Result<Fd> {
+        match self.fds.get(&old_fd) {
+            None => Err("No such fd".to_owned()),
+            Some(open_file_id) => {
+                let new_fd = self.next_fd;
+                let cloned_ref = Arc::clone(open_file_id);
+                self.fds.insert(new_fd, cloned_ref);
+                self.next_fd += 1;
+                Ok(new_fd)
+            }
+        }
+    }
+
+    fn set_fd_to_same_as(&mut self, dst_fd: Fd, src_fd: Fd) -> Result<()> {
+        match self.fds.get(&src_fd) {
+            None => Err(format!("No such fd: {}", src_fd)),
+            Some(open_file_id) => {
+                if !self.fds.contains_key(&dst_fd) {
+                    return Err(format!("No such fd: {}", dst_fd));
+                }
+
+                let cloned_ref = Arc::clone(open_file_id);
+                self.fds.insert(dst_fd, cloned_ref);
+                Ok(())
+            }
+        }
+    }
+
     fn find_open_file(&mut self, fd: Fd) -> Result<OpenFileId> {
         self.fds
             .get(&fd)
-            .copied()
+            .map(|x| *x.as_ref())
             .ok_or_else(|| format!("No such fd: {}", fd))
     }
 
-    fn take_open_file(&mut self, fd: Fd) -> Result<OpenFileId> {
+    fn cloned_open_file(&mut self, fd: Fd) -> Result<Arc<OpenFileId>> {
+        let open_file_id = self
+            .fds
+            .get(&fd)
+            .ok_or_else(|| format!("No such fd: {}", fd))?;
+        Ok(Arc::clone(open_file_id))
+    }
+
+    fn take_open_file(&mut self, fd: Fd) -> Result<Arc<OpenFileId>> {
         self.fds
             .remove(&fd)
             .ok_or_else(|| format!("No such fd: {}", fd))
     }
 
-    fn take_fds(&mut self) -> HashMap<Fd, OpenFileId> {
+    fn take_fds(&mut self) -> HashMap<Fd, Arc<OpenFileId>> {
         std::mem::take(&mut self.fds)
     }
 
@@ -183,12 +234,6 @@ impl Process {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
-pub struct OpenFile {
-    fd: Fd,
-    open_file_id: u32,
-}
-
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum ProcessState {
     Running,
@@ -202,10 +247,8 @@ pub struct System {
 }
 
 impl System {
-    pub fn new() -> Self {
-        Self {
-            vfs: VirtualFilesystemSwitch::new(),
-        }
+    pub fn new(vfs: VirtualFilesystemSwitch) -> Self {
+        Self { vfs }
     }
 
     pub fn spawn_process(
@@ -214,18 +257,19 @@ impl System {
         name: String,
         parent_pid: Pid,
         uid: Uid,
-        stdout: Option<OpenFileId>,
+        stdin: Option<Arc<OpenFileId>>,
+        stdout: Option<Arc<OpenFileId>>,
     ) -> ProcessHandle {
-        let pid = processes.add(name, parent_pid, uid, stdout);
+        let pid = processes.add(name, parent_pid, uid, stdin, stdout);
         ProcessHandle {
             shared_sys: sys,
             pid,
         }
     }
 
-    fn close_files(&mut self, open_files: impl Iterator<Item = OpenFileId>, pid: Pid) {
+    fn close_files(&mut self, open_files: impl Iterator<Item = Arc<OpenFileId>>) {
         for open_file_id in open_files {
-            if let Err(e) = self.vfs.close_file(open_file_id, pid) {
+            if let Err(e) = self.vfs.close_file(open_file_id) {
                 println!("WARN: Failed to close file: {}", e);
             }
         }
@@ -239,7 +283,7 @@ fn close_zombies_fds(mut active_handle: ActiveProcessHandle, pid: Pid) {
     //Release lock before using VFS
     drop(processes);
     eprintln!("Closing zombie fds: {:?}", fds);
-    active_handle.sys.close_files(fds.into_values(), pid);
+    active_handle.sys.close_files(fds.into_values());
 }
 
 #[derive(Debug)]
@@ -282,39 +326,56 @@ impl ProcessHandle {
     pub fn sc_spawn<S: Into<String>>(
         &mut self,
         path: S,
-        stdout: SpawnStdout,
+        fds: SpawnFds,
         uid: SpawnUid,
+        action: Option<SpawnAction>,
     ) -> Result<Pid> {
-        let path = path.into();
-        let self_pid = self.pid;
-        let child_sys = self.shared_sys.clone();
-        let active_handle = ActiveProcessHandle::new(self);
-        let mut processes = active_handle.process_table();
-        let current_proc = processes.current();
-        current_proc.log.push(format!("spawn({:?})", path));
+        let child_handle = {
+            let path = path.into();
+            let self_pid = self.pid;
+            let child_sys = self.shared_sys.clone();
 
-        let child_stdout = match stdout {
-            SpawnStdout::Inherit => current_proc.find_open_file(1).ok(),
-            SpawnStdout::OpenFile(fd) => current_proc.find_open_file(fd).ok(),
+            let active_handle = ActiveProcessHandle::new(self);
+            let mut processes = active_handle.process_table();
+            let current_proc = processes.current();
+            current_proc.log.push(format!("spawn({:?})", path));
+
+            let (stdin, stdout) = match fds {
+                SpawnFds::Inherit => (
+                    current_proc.cloned_open_file(0).ok(),
+                    current_proc.cloned_open_file(1).ok(),
+                ),
+                SpawnFds::Set(stdin, stdout) => (
+                    current_proc.cloned_open_file(stdin).ok(),
+                    current_proc.cloned_open_file(stdout).ok(),
+                ),
+            };
+            let child_uid = match uid {
+                SpawnUid::Inherit => current_proc.uid,
+                SpawnUid::Uid(uid) => uid,
+            };
+            eprintln!("Spawning {}. Stdout={:?}, Uid={:?}", path, stdin, stdout,);
+            eprintln!("Current proc open files: {:?}", current_proc.fds);
+            System::spawn_process(
+                processes, child_sys, path, self_pid, child_uid, stdin, stdout,
+            )
         };
-        let child_uid = match uid {
-            SpawnUid::Inherit => current_proc.uid,
-            SpawnUid::Uid(uid) => uid,
-        };
-        eprintln!(
-            "Spawning {}. Stdout={:?}, Uid={:?}",
-            path, child_stdout, child_uid,
-        );
-        eprintln!("Current proc open files: {:?}", current_proc.fds);
-        let child_handle = System::spawn_process(
-            processes,
-            child_sys,
-            path,
-            self_pid,
-            child_uid,
-            child_stdout,
-        );
         let child_pid = child_handle.pid;
+
+        if let Some(SpawnAction::ClaimTerminal(terminal_fd)) = action {
+            let mut active_handle = ActiveProcessHandle::new(self);
+            let mut processes = active_handle.process_table();
+            let current_proc = processes.current();
+
+            let open_file_id = current_proc.find_open_file(terminal_fd)?;
+
+            //Release process lock before using VFS
+            drop(processes);
+            active_handle.sys.vfs.ioctl(
+                open_file_id,
+                IoctlRequest::SetTerminalForegroundProcess(child_pid),
+            )?;
+        }
 
         let mut spawn_queue = GLOBAL_PROCESS_SPAWN_QUEUE.lock().unwrap();
         spawn_queue.push_front(child_handle);
@@ -349,7 +410,8 @@ impl ProcessHandle {
             let mut processes = active_context.process_table();
             let proc = processes.current();
             proc.state = ProcessState::Waiting;
-            proc.log.push(format!("wait_pid({:?})", target));
+            proc.log
+                .push(format!("wait_pid({:?}, {:?})", target, options));
         }
         //Release all locks before sleeping
         loop {
@@ -404,6 +466,8 @@ impl ProcessHandle {
         let victim_proc = processes
             .process(pid)
             .ok_or_else(|| "No such process".to_owned())?;
+        //TODO can a process kill its parent? It doesn't seem to work
+        //when a subshell tries to kill the parent shell
         if victim_proc.uid != self_uid {
             return Err(format!(
                 "Cannot kill process with uid: {:?}",
@@ -434,19 +498,29 @@ impl ProcessHandle {
         active_context
             .sys
             .vfs
-            .create_file(path, file_type, permissions, cwd, None)
+            .create_file(path, file_type, permissions, cwd)
     }
 
-    pub fn sc_open(&mut self, path: &str) -> Result<Fd> {
+    pub fn sc_open(
+        &mut self,
+        path: &str,
+        flags: OpenFlags,
+        creation_file_permissions: Option<FilePermissions>,
+    ) -> Result<Fd> {
         let mut active_context = ActiveProcessHandle::new(self);
         let mut processes = active_context.process_table();
         let proc = processes.current();
-        proc.log.push(format!("open({:?})", path));
-        let (cwd, fd, pid) = (proc.cwd, proc.next_fd, proc.pid);
+        proc.log.push(format!(
+            "open({:?}, {:?}, {:?})",
+            path, flags, creation_file_permissions
+        ));
+        let (cwd, fd) = (proc.cwd, proc.next_fd);
         // Release process lock before using VFS
         drop(processes);
 
-        let open_file_id = active_context.sys.vfs.open_file(path, cwd, pid)?;
+        let vfs = &mut active_context.sys.vfs;
+
+        let open_file_id = vfs.open_file(path, cwd, flags, creation_file_permissions)?;
 
         eprintln!(
             "In sc_open: Opened fd {} with open_file_id: {:?}",
@@ -465,7 +539,6 @@ impl ProcessHandle {
         let mut processes = active_context.process_table();
         let proc = processes.current();
         proc.log.push(format!("close({})", fd));
-        let pid = proc.pid;
         let open_file_id = proc.take_open_file(fd)?;
         eprintln!(
             "In sc_close: Closing fd {} with open_file_id: {:?}",
@@ -474,7 +547,12 @@ impl ProcessHandle {
 
         // Release process lock before using VFS
         drop(processes);
-        active_context.sys.vfs.close_file(open_file_id, pid)
+
+        //BUG: This should only remove the file
+        //from the file description table, if there are no
+        //remaining references to it
+
+        active_context.sys.vfs.close_file(open_file_id)
     }
 
     pub fn sc_stat(&mut self, path: &str) -> Result<FileStat> {
@@ -490,6 +568,18 @@ impl ProcessHandle {
         active_context.sys.vfs.stat_file(path, cwd)
     }
 
+    pub fn sc_ioctl(&mut self, fd: Fd, req: IoctlRequest) -> Result<()> {
+        let mut active_context = ActiveProcessHandle::new(self);
+        let mut processes = active_context.process_table();
+        let proc = processes.current();
+        proc.log.push(format!("ioctl({:?})", req));
+        let open_file_id = proc.find_open_file(fd)?;
+        // Release process lock before using VFS
+        drop(processes);
+
+        active_context.sys.vfs.ioctl(open_file_id, req)
+    }
+
     pub fn sc_getdents(&mut self, fd: Fd) -> Result<Vec<DirectoryEntry>> {
         let mut active_context = ActiveProcessHandle::new(self);
         let open_file_id = {
@@ -503,7 +593,7 @@ impl ProcessHandle {
         active_context.sys.vfs.list_dir(open_file_id)
     }
 
-    pub fn sc_read(&mut self, fd: Fd, buf: &mut [u8]) -> Result<usize> {
+    pub fn sc_read(&mut self, fd: Fd, buf: &mut [u8]) -> Result<Option<usize>> {
         let mut active_context = ActiveProcessHandle::new(self);
         let open_file_id = {
             let mut processes = active_context.process_table();
@@ -611,6 +701,24 @@ impl ProcessHandle {
         // unlock process table before calling VFS
         active_context.sys.vfs.rename_file(old_path, new_path, cwd)
     }
+
+    pub fn sc_dup(&mut self, oldfd: Fd) -> Result<Fd> {
+        let active_context = ActiveProcessHandle::new(self);
+        let mut processes = active_context.process_table();
+        let proc = processes.current();
+        proc.log.push(format!("dup({:?})", oldfd));
+
+        proc.duplicate_fd(oldfd)
+    }
+
+    pub fn sc_dup2(&mut self, oldfd: Fd, newfd: Fd) -> Result<()> {
+        let active_context = ActiveProcessHandle::new(self);
+        let mut processes = active_context.process_table();
+        let proc = processes.current();
+        proc.log.push(format!("dup2({:?}, {:?})", oldfd, newfd));
+
+        proc.set_fd_to_same_as(newfd, oldfd)
+    }
 }
 
 impl Drop for ProcessHandle {
@@ -630,7 +738,7 @@ impl Drop for ProcessHandle {
             eprintln!("Dropping process {:?}. Will close fds: {:?}", pid, fds);
             // Release process lock before using VFS
             drop(processes);
-            sys.close_files(fds.into_values(), pid);
+            sys.close_files(fds.into_values());
         } else {
             eprintln!("Process has already been reaped");
         }
@@ -650,15 +758,32 @@ pub enum WaitPidOptions {
 }
 
 #[derive(Debug)]
-pub enum SpawnStdout {
+pub enum SpawnFds {
     Inherit,
-    OpenFile(Fd),
+    Set(Fd, Fd),
 }
 
 #[derive(Debug)]
 pub enum SpawnUid {
     Inherit,
     Uid(Uid),
+}
+
+#[derive(Debug)]
+pub enum SpawnAction {
+    ClaimTerminal(Fd),
+}
+
+#[derive(Debug)]
+pub enum IoctlRequest {
+    SetTerminalForegroundProcess(Pid),
+}
+
+bitflags! {
+    pub struct OpenFlags: u8 {
+        const CREATE  = 0b0000_0001;
+        const TRUNCATE  = 0b0000_0010;
+    }
 }
 
 struct ActiveProcessHandle<'a> {
@@ -726,13 +851,15 @@ mod tests {
     static TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
     fn setup() -> ProcessHandle {
-        let sys = System::new();
+        let vfs = VirtualFilesystemSwitch::new();
+        let sys = System::new(vfs);
         System::spawn_process(
             GLOBAL_PROCESS_TABLE.lock().unwrap(),
             Arc::new(Mutex::new(sys)),
             "test".to_owned(),
             Pid(1),
             Uid(1),
+            None,
             None,
         )
     }
@@ -789,7 +916,7 @@ mod tests {
             .unwrap();
         assert_eq!(proc.sc_stat("/myfile").unwrap().size, 0);
 
-        let fd = proc.sc_open("/myfile").unwrap();
+        let fd = proc.sc_open("/myfile", OpenFlags::empty(), None).unwrap();
         proc.sc_write(fd, &[1, 2, 3]).unwrap();
         assert_eq!(proc.sc_stat("/myfile").unwrap().size, 3);
     }
@@ -800,7 +927,7 @@ mod tests {
         let mut proc = setup();
         proc.sc_create("/myfile", FileType::Regular, FilePermissions::ReadWrite)
             .unwrap();
-        let fd = proc.sc_open("/myfile").unwrap();
+        let fd = proc.sc_open("/myfile", OpenFlags::empty(), None).unwrap();
         proc.sc_close(fd).unwrap();
     }
 
@@ -810,22 +937,22 @@ mod tests {
         let mut proc = setup();
         proc.sc_create("/myfile", FileType::Regular, FilePermissions::ReadWrite)
             .unwrap();
-        let fd = proc.sc_open("/myfile").unwrap();
+        let fd = proc.sc_open("/myfile", OpenFlags::empty(), None).unwrap();
         proc.sc_write(fd, &[0, 10, 20, 30]).unwrap();
         let buf = &mut [0, 0];
         proc.sc_seek(fd, 1).unwrap();
-        let mut n = proc.sc_read(fd, buf).unwrap();
+        let mut n = proc.sc_read(fd, buf).unwrap().unwrap();
         assert_eq!(buf, &[10, 20]);
         assert_eq!(n, 2);
-        n = proc.sc_read(fd, buf).unwrap();
+        n = proc.sc_read(fd, buf).unwrap().unwrap();
         assert_eq!(buf, &[30, 20]);
         assert_eq!(n, 1);
-        n = proc.sc_read(fd, buf).unwrap();
+        n = proc.sc_read(fd, buf).unwrap().unwrap();
         assert_eq!(n, 0);
     }
 
     fn list_dir(ctx: &mut ProcessHandle, path: &str) -> Vec<String> {
-        let fd = ctx.sc_open(path).unwrap();
+        let fd = ctx.sc_open(path, OpenFlags::empty(), None).unwrap();
         let dents = ctx.sc_getdents(fd).unwrap();
         ctx.sc_close(fd).unwrap();
         dents.into_iter().map(|e| e.name).collect()

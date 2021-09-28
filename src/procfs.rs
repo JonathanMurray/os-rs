@@ -3,7 +3,7 @@ use std::io::{Cursor, Read};
 use std::sync::MutexGuard;
 use std::time::Instant;
 
-use crate::sys::{GlobalProcessTable, GLOBAL_PROCESS_TABLE};
+use crate::sys::{GlobalProcessTable, IoctlRequest, GLOBAL_PROCESS_TABLE};
 use crate::util::{
     DirectoryEntry, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier,
     OpenFileId, Pid,
@@ -193,7 +193,7 @@ impl ProcFilesystem {
         open_file_id: OpenFileId,
         buf: &mut [u8],
         file_offset: usize,
-    ) -> Result<usize> {
+    ) -> Result<Option<usize>> {
         let file = self
             .open_files
             .get(&open_file_id)
@@ -202,7 +202,7 @@ impl ProcFilesystem {
             let mut cursor = Cursor::new(&content);
             cursor.set_position(file_offset as u64);
             let num_read = cursor.read(buf).expect("Failed to read from file");
-            Ok(num_read)
+            Ok(Some(num_read))
         } else {
             Err("Cannot read directory".to_owned())
         }
@@ -217,6 +217,10 @@ impl Filesystem for ProcFilesystem {
         }
     }
 
+    fn ioctl(&mut self, _inode_number: Ino, _req: IoctlRequest) -> Result<()> {
+        Err("ioctl not supported by procfs".to_owned())
+    }
+
     fn create(
         &mut self,
         _parent_directory: InodeIdentifier,
@@ -224,6 +228,10 @@ impl Filesystem for ProcFilesystem {
         _permissions: FilePermissions,
     ) -> Result<Ino> {
         Err("Can't create file on procfs".to_owned())
+    }
+
+    fn truncate(&mut self, _inode_number: Ino) -> Result<()> {
+        Err("Can't truncate file on procfs".to_owned())
     }
 
     fn remove(&mut self, _inode_number: Ino) -> Result<()> {
@@ -275,7 +283,7 @@ impl Filesystem for ProcFilesystem {
         id: OpenFileId,
         buf: &mut [u8],
         file_offset: usize,
-    ) -> Result<usize> {
+    ) -> Result<Option<usize>> {
         self.read_file_at_offset(id, buf, file_offset)
     }
 

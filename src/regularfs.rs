@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
 
+use crate::sys::IoctlRequest;
 use crate::util::{
     DirectoryEntry, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier,
     OpenFileId,
@@ -206,13 +207,13 @@ impl RegularFilesystem {
         inode_number: Ino,
         buf: &mut [u8],
         file_offset: usize,
-    ) -> Result<usize> {
+    ) -> Result<Option<usize>> {
         match self.files.get(&inode_number).map(|file| &file.content) {
             Some(FileContent::Regular(regular_file)) => {
                 let mut cursor = Cursor::new(&regular_file);
                 cursor.set_position(file_offset as u64);
                 let num_read = cursor.read(buf).expect("Failed to read from file");
-                Ok(num_read)
+                Ok(Some(num_read))
             }
             Some(FileContent::Dir(_)) => Err("It's a directory".to_owned()),
             None => Err("No such file".to_owned()),
@@ -277,6 +278,10 @@ impl Filesystem for RegularFilesystem {
         }
     }
 
+    fn ioctl(&mut self, _inode_number: Ino, _req: IoctlRequest) -> Result<()> {
+        Err("ioctl not supported by regular fs".to_owned())
+    }
+
     fn create(
         &mut self,
         parent_directory: InodeIdentifier,
@@ -284,6 +289,20 @@ impl Filesystem for RegularFilesystem {
         permissions: FilePermissions,
     ) -> Result<Ino> {
         Ok(self.create_inode(file_type, permissions, parent_directory))
+    }
+
+    fn truncate(&mut self, inode_number: Ino) -> Result<()> {
+        let file = self
+            .files
+            .get_mut(&inode_number)
+            .ok_or_else(|| "No such file".to_owned())?;
+        match &mut file.content {
+            FileContent::Regular(regular_file) => {
+                regular_file.clear();
+                Ok(())
+            }
+            FileContent::Dir(_) => Err("Can't truncate directory".to_owned()),
+        }
     }
 
     fn remove(&mut self, inode_number: Ino) -> Result<()> {
@@ -333,7 +352,7 @@ impl Filesystem for RegularFilesystem {
         _id: OpenFileId,
         buf: &mut [u8],
         file_offset: usize,
-    ) -> Result<usize> {
+    ) -> Result<Option<usize>> {
         self.read_file_at_offset(inode_number, buf, file_offset)
     }
 
