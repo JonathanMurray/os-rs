@@ -38,14 +38,14 @@ pub struct GlobalProcessTable {
 impl GlobalProcessTable {
     fn add(
         &mut self,
-        process_name: String,
+        args: Vec<String>,
         parent_pid: Pid,
         uid: Uid,
         fds: (Option<Arc<OpenFileId>>, Option<Arc<OpenFileId>>),
         cwd: InodeIdentifier,
     ) -> Pid {
         let pid = self.next_pid;
-        let process = Process::new(pid, parent_pid, uid, process_name, fds, cwd);
+        let process = Process::new(pid, parent_pid, uid, args, fds, cwd);
         self.next_pid = Pid(self.next_pid.0 + 1);
         self.processes.insert(pid, process);
         pid
@@ -92,7 +92,7 @@ pub struct Process {
     pub pid: Pid,
     pub parent_pid: Pid,
     pub uid: Uid,
-    pub name: String,
+    pub args: Vec<String>,
     pub fds: HashMap<Fd, Arc<OpenFileId>>,
     next_fd: Fd,
     cwd: InodeIdentifier,
@@ -107,7 +107,7 @@ impl Process {
         pid: Pid,
         parent_pid: Pid,
         uid: Uid,
-        name: String,
+        args: Vec<String>,
         fds: (Option<Arc<OpenFileId>>, Option<Arc<OpenFileId>>),
         cwd: InodeIdentifier,
     ) -> Self {
@@ -126,7 +126,7 @@ impl Process {
             pid,
             parent_pid,
             uid,
-            name,
+            args,
             fds: fd_map,
             next_fd,
             cwd,
@@ -247,13 +247,13 @@ impl System {
     pub fn spawn_process(
         mut processes: MutexGuard<'_, GlobalProcessTable>,
         sys: Arc<Mutex<System>>,
-        name: String,
+        args: Vec<String>,
         parent_pid: Pid,
         uid: Uid,
         fds: (Option<Arc<OpenFileId>>, Option<Arc<OpenFileId>>),
         cwd: InodeIdentifier,
     ) -> ProcessHandle {
-        let pid = processes.add(name, parent_pid, uid, fds, cwd);
+        let pid = processes.add(args, parent_pid, uid, fds, cwd);
         ProcessHandle {
             shared_sys: sys,
             pid,
@@ -288,10 +288,10 @@ pub struct ProcessHandle {
 }
 
 impl ProcessHandle {
-    pub fn process_name(&mut self) -> String {
+    pub fn clone_args(&mut self) -> Vec<String> {
         let active_handle = ActiveProcessHandle::new(self);
         let mut processes = active_handle.process_table();
-        processes.current().name.clone()
+        processes.current().args.clone()
     }
 
     pub fn handle_signals(mut self) -> Option<Self> {
@@ -316,15 +316,17 @@ impl ProcessHandle {
         self.pid
     }
 
-    pub fn sc_spawn<S: Into<String>>(
+    pub fn sc_spawn(
         &mut self,
-        path: S,
+        args: Vec<String>,
         fds: SpawnFds,
         uid: SpawnUid,
         action: Option<SpawnAction>,
     ) -> Result<Pid> {
+        let path = args
+            .get(0)
+            .ok_or_else(|| "Empty args not allowed".to_owned())?;
         let child_handle = {
-            let path = path.into();
             let self_pid = self.pid;
             let child_sys = self.shared_sys.clone();
 
@@ -353,7 +355,7 @@ impl ProcessHandle {
             System::spawn_process(
                 processes,
                 child_sys,
-                path,
+                args,
                 self_pid,
                 child_uid,
                 (stdin, stdout),
@@ -857,7 +859,7 @@ mod tests {
         System::spawn_process(
             GLOBAL_PROCESS_TABLE.lock().unwrap(),
             Arc::new(Mutex::new(sys)),
-            "test".to_owned(),
+            vec!["test".to_owned()],
             Pid(1),
             Uid(1),
             (None, None),

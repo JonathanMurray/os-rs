@@ -53,7 +53,7 @@ impl ProcFilesystem {
                         "{} {} {} {:?} {} {} {:?}\n",
                         proc.pid.0,
                         proc.parent_pid.0,
-                        proc.name,
+                        proc.args[0],
                         proc.state,
                         proc.uid.0,
                         proc.fds.len(),

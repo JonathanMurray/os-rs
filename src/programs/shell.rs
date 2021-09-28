@@ -313,12 +313,12 @@ impl ShellProcess {
     }
 
     fn dynamic_program(&mut self, args: &[&str], run_in_background: bool) -> Result<()> {
-        let path = format!("/bin/{}", args[0]);
-
+        let mut args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        args[0] = format!("/bin/{}", args[0]);
         if run_in_background {
             let child_pid =
                 self.handle
-                    .sc_spawn(path, SpawnFds::Inherit, SpawnUid::Inherit, None)?;
+                    .sc_spawn(args, SpawnFds::Inherit, SpawnUid::Inherit, None)?;
             println!("[{}] running in background...", child_pid.0);
             self.background_processes.insert(child_pid);
         } else {
@@ -326,7 +326,7 @@ impl ShellProcess {
                 .handle
                 .sc_open("/dev/terminal", OpenFlags::empty(), None)?;
             let child_pid = self.handle.sc_spawn(
-                path,
+                args,
                 SpawnFds::Inherit,
                 SpawnUid::Inherit,
                 Some(SpawnAction::ClaimTerminal(terminal_fd)),

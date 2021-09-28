@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use crate::devfs::DevFilesystem;
 use crate::programs::background;
+use crate::programs::file;
 use crate::programs::shell::ShellProcess;
 use crate::sys::{
     OpenFlags, ProcessHandle, SpawnAction, SpawnFds, SpawnUid, System, WaitPidOptions,
@@ -47,7 +48,7 @@ pub async fn main() {
         let init_handle = System::spawn_process(
             processes,
             sys,
-            "init".to_owned(),
+            vec!["init".to_owned()],
             init_pid,
             Uid(0),
             (None, None),
@@ -97,6 +98,7 @@ fn run_init_proc(mut handle: ProcessHandle, liveness_checker: Arc<()>) {
     create_program_file(&mut handle, "/bin/sleep", "sleep").unwrap();
     create_program_file(&mut handle, "/bin/background", "background").unwrap();
     create_program_file(&mut handle, "/bin/shell", "shell").unwrap();
+    create_program_file(&mut handle, "/bin/file", "file").unwrap();
     let log_fd = handle
         .sc_open("/dev/log", OpenFlags::empty(), None)
         .unwrap();
@@ -107,7 +109,7 @@ fn run_init_proc(mut handle: ProcessHandle, liveness_checker: Arc<()>) {
     let shell_uid = Uid(1);
     handle
         .sc_spawn(
-            "/bin/shell",
+            vec!["/bin/shell".to_owned()],
             SpawnFds::Set(terminal_fd, terminal_fd),
             SpawnUid::Uid(shell_uid),
             Some(SpawnAction::ClaimTerminal(terminal_fd)),
@@ -116,7 +118,7 @@ fn run_init_proc(mut handle: ProcessHandle, liveness_checker: Arc<()>) {
     handle.sc_close(terminal_fd).unwrap();
     handle
         .sc_spawn(
-            "/bin/background",
+            vec!["/bin/background".to_owned()],
             SpawnFds::Inherit,
             SpawnUid::Inherit,
             None,
@@ -136,7 +138,12 @@ fn run_init_proc(mut handle: ProcessHandle, liveness_checker: Arc<()>) {
         };
 
         handle
-            .sc_spawn("/bin/script", SpawnFds::Inherit, SpawnUid::Inherit, None)
+            .sc_spawn(
+                vec!["/bin/script".to_owned()],
+                SpawnFds::Inherit,
+                SpawnUid::Inherit,
+                None,
+            )
             .expect("spawn child from init");
         let child_result = handle
             .sc_wait_pid(WaitPidTarget::AnyChild, WaitPidOptions::Default)
@@ -146,7 +153,12 @@ fn run_init_proc(mut handle: ProcessHandle, liveness_checker: Arc<()>) {
             .unwrap();
 
         let sleep_pid = handle
-            .sc_spawn("/bin/sleep", SpawnFds::Inherit, SpawnUid::Inherit, None)
+            .sc_spawn(
+                vec!["/bin/sleep".to_owned()],
+                SpawnFds::Inherit,
+                SpawnUid::Inherit,
+                None,
+            )
             .expect("spawn sleep from init");
         handle
             .sc_wait_pid(WaitPidTarget::Pid(sleep_pid), WaitPidOptions::Default)
@@ -172,15 +184,16 @@ fn create_program_file(handle: &mut ProcessHandle, path: &str, program_name: &st
 }
 
 fn run_new_proc(mut handle: ProcessHandle) {
-    let name = handle.process_name();
+    let args = handle.clone_args();
+    let name = &args[0];
 
-    if let Err(err) = handle.sc_stat(&name) {
+    if let Err(err) = handle.sc_stat(name) {
         eprintln!("did not find {}: {}", name, err);
         handle.sc_exit(1);
         return;
     }
 
-    let fd = handle.sc_open(&name, OpenFlags::empty(), None).unwrap();
+    let fd = handle.sc_open(name, OpenFlags::empty(), None).unwrap();
     //TODO: introduce a file abstraction that makes these things easier
     let mut buf = vec![0; 1024];
     let n_read = handle.sc_read(fd, &mut buf).unwrap().unwrap();
@@ -197,6 +210,7 @@ fn run_new_proc(mut handle: ProcessHandle) {
             Ok("background\n") => background::run_background_proc(handle),
             Ok("shell\n") => ShellProcess::new(handle).run(),
             Ok("sleep\n") => run_sleep_proc(handle),
+            Ok("file\n") => file::run_file_proc(handle, args),
             _ => {
                 eprintln!("Not a valid executable: {}. ({:?})", name, rest);
                 handle.sc_exit(2);
