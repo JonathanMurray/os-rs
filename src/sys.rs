@@ -288,16 +288,16 @@ pub struct ProcessHandle {
 }
 
 impl ProcessHandle {
-    pub fn clone_args(&mut self) -> Vec<String> {
+    pub fn clone_args(&self) -> Vec<String> {
         let active_handle = ActiveProcessHandle::new(self);
         let mut processes = active_handle.process_table();
         processes.current().args.clone()
     }
 
-    pub fn handle_signals(mut self) -> Option<Self> {
+    pub fn handle_signals(self) -> Option<Self> {
         let pid = self.pid;
         {
-            let active_handle = ActiveProcessHandle::new(&mut self);
+            let active_handle = ActiveProcessHandle::new(&self);
             let mut processes = active_handle.process_table();
             let process = processes.process(pid).expect("This process must exist");
             let killed = process.handle_kill_signal();
@@ -317,7 +317,7 @@ impl ProcessHandle {
     }
 
     pub fn sc_spawn(
-        &mut self,
+        &self,
         args: Vec<String>,
         fds: SpawnFds,
         uid: SpawnUid,
@@ -385,9 +385,9 @@ impl ProcessHandle {
         Ok(child_pid)
     }
 
-    pub fn sc_exit(mut self, code: u32) {
+    pub fn sc_exit(self, code: u32) {
         let self_pid = self.pid;
-        let active_handle = ActiveProcessHandle::new(&mut self);
+        let active_handle = ActiveProcessHandle::new(&self);
 
         let mut processes = active_handle.process_table();
 
@@ -402,7 +402,7 @@ impl ProcessHandle {
     }
 
     pub fn sc_wait_pid(
-        &mut self,
+        &self,
         target: WaitPidTarget,
         options: WaitPidOptions,
     ) -> Result<Option<(Pid, ProcessResult)>> {
@@ -455,7 +455,7 @@ impl ProcessHandle {
         }
     }
 
-    pub fn sc_kill(&mut self, pid: Pid) -> Result<()> {
+    pub fn sc_kill(&self, pid: Pid) -> Result<()> {
         //we only support SIGKILL for now.
         let active_context = ActiveProcessHandle::new(self);
         let mut processes = active_context.process_table();
@@ -481,7 +481,7 @@ impl ProcessHandle {
     }
 
     pub fn sc_create<S: Into<String>>(
-        &mut self,
+        &self,
         path: S,
         file_type: FileType,
         permissions: FilePermissions,
@@ -504,7 +504,7 @@ impl ProcessHandle {
     }
 
     pub fn sc_open(
-        &mut self,
+        &self,
         path: &str,
         flags: OpenFlags,
         creation_file_permissions: Option<FilePermissions>,
@@ -536,7 +536,7 @@ impl ProcessHandle {
         Ok(fd)
     }
 
-    pub fn sc_close(&mut self, fd: Fd) -> Result<()> {
+    pub fn sc_close(&self, fd: Fd) -> Result<()> {
         let mut active_context = ActiveProcessHandle::new(self);
         let mut processes = active_context.process_table();
         let proc = processes.current();
@@ -557,7 +557,7 @@ impl ProcessHandle {
         active_context.sys.vfs.close_file(open_file_id)
     }
 
-    pub fn sc_stat(&mut self, path: &str) -> Result<FileStat> {
+    pub fn sc_stat(&self, path: &str) -> Result<FileStat> {
         let mut active_context = ActiveProcessHandle::new(self);
         let cwd = {
             let mut processes = active_context.process_table();
@@ -570,7 +570,7 @@ impl ProcessHandle {
         active_context.sys.vfs.stat_file(path, cwd)
     }
 
-    pub fn sc_ioctl(&mut self, fd: Fd, req: IoctlRequest) -> Result<()> {
+    pub fn sc_ioctl(&self, fd: Fd, req: IoctlRequest) -> Result<()> {
         let mut active_context = ActiveProcessHandle::new(self);
         let mut processes = active_context.process_table();
         let proc = processes.current();
@@ -582,7 +582,7 @@ impl ProcessHandle {
         active_context.sys.vfs.ioctl(open_file_id, req)
     }
 
-    pub fn sc_getdents(&mut self, fd: Fd) -> Result<Vec<DirectoryEntry>> {
+    pub fn sc_getdents(&self, fd: Fd) -> Result<Vec<DirectoryEntry>> {
         let mut active_context = ActiveProcessHandle::new(self);
         let open_file_id = {
             let mut processes = active_context.process_table();
@@ -595,7 +595,7 @@ impl ProcessHandle {
         active_context.sys.vfs.list_dir(open_file_id)
     }
 
-    pub fn sc_read(&mut self, fd: Fd, buf: &mut [u8]) -> Result<Option<usize>> {
+    pub fn sc_read(&self, fd: Fd, buf: &mut [u8]) -> Result<Option<usize>> {
         let mut active_context = ActiveProcessHandle::new(self);
         let open_file_id = {
             let mut processes = active_context.process_table();
@@ -608,7 +608,7 @@ impl ProcessHandle {
         active_context.sys.vfs.read_file(open_file_id, buf)
     }
 
-    pub fn sc_write(&mut self, fd: Fd, buf: &[u8]) -> Result<usize> {
+    pub fn sc_write(&self, fd: Fd, buf: &[u8]) -> Result<usize> {
         //TODO permissions
 
         let mut active_context = ActiveProcessHandle::new(self);
@@ -631,7 +631,7 @@ impl ProcessHandle {
         Ok(num_written)
     }
 
-    pub fn sc_seek(&mut self, fd: Fd, offset: usize) -> Result<()> {
+    pub fn sc_seek(&self, fd: Fd, offset: usize) -> Result<()> {
         let mut active_context = ActiveProcessHandle::new(self);
         let mut processes = active_context.process_table();
         let proc = processes.current();
@@ -643,7 +643,7 @@ impl ProcessHandle {
         active_context.sys.vfs.seek(open_file_id, offset)
     }
 
-    pub fn sc_chdir<S: Into<String>>(&mut self, path: S) -> Result<()> {
+    pub fn sc_chdir<S: Into<String>>(&self, path: S) -> Result<()> {
         let mut active_context = ActiveProcessHandle::new(self);
         let path = path.into();
         let cwd = {
@@ -658,12 +658,12 @@ impl ProcessHandle {
 
         let cwd = new_cwd_inode.id;
         let mut processes = active_context.process_table();
-        let mut proc = processes.current();
+        let proc = processes.current();
         proc.cwd = cwd;
         Ok(())
     }
 
-    pub fn sc_get_current_dir_name(&mut self) -> Result<String> {
+    pub fn sc_get_current_dir_name(&self) -> Result<String> {
         let mut active_context = ActiveProcessHandle::new(self);
         let cwd = {
             let mut processes = active_context.process_table();
@@ -676,7 +676,7 @@ impl ProcessHandle {
         active_context.sys.vfs.path_from_inode(cwd)
     }
 
-    pub fn sc_unlink(&mut self, path: &str) -> Result<()> {
+    pub fn sc_unlink(&self, path: &str) -> Result<()> {
         let mut active_context = ActiveProcessHandle::new(self);
         let cwd = {
             let mut processes = active_context.process_table();
@@ -689,7 +689,7 @@ impl ProcessHandle {
         active_context.sys.vfs.unlink_file(path, cwd)
     }
 
-    pub fn sc_rename<S: Into<String>>(&mut self, old_path: &str, new_path: S) -> Result<()> {
+    pub fn sc_rename<S: Into<String>>(&self, old_path: &str, new_path: S) -> Result<()> {
         let mut active_context = ActiveProcessHandle::new(self);
         let new_path = new_path.into();
         let cwd = {
@@ -704,7 +704,7 @@ impl ProcessHandle {
         active_context.sys.vfs.rename_file(old_path, new_path, cwd)
     }
 
-    pub fn sc_dup(&mut self, oldfd: Fd) -> Result<Fd> {
+    pub fn sc_dup(&self, oldfd: Fd) -> Result<Fd> {
         let active_context = ActiveProcessHandle::new(self);
         let mut processes = active_context.process_table();
         let proc = processes.current();
@@ -713,7 +713,7 @@ impl ProcessHandle {
         proc.duplicate_fd(oldfd)
     }
 
-    pub fn sc_dup2(&mut self, oldfd: Fd, newfd: Fd) -> Result<()> {
+    pub fn sc_dup2(&self, oldfd: Fd, newfd: Fd) -> Result<()> {
         let active_context = ActiveProcessHandle::new(self);
         let mut processes = active_context.process_table();
         let proc = processes.current();
@@ -794,7 +794,7 @@ struct ActiveProcessHandle<'a> {
 }
 
 impl<'a> ActiveProcessHandle<'a> {
-    fn new(handle: &'a mut ProcessHandle) -> Self {
+    fn new(handle: &'a ProcessHandle) -> Self {
         let sys = handle.shared_sys.lock().unwrap();
 
         // LOCKING: We have locked System above
@@ -873,7 +873,7 @@ mod tests {
     #[test]
     fn creating_file() {
         let _lock = TEST_LOCK.lock().unwrap();
-        let mut ctx = setup();
+        let ctx = setup();
         ctx.sc_create("/myfile", FileType::Regular, FilePermissions::ReadWrite)
             .unwrap();
     }
@@ -881,7 +881,7 @@ mod tests {
     #[test]
     fn creating_files_and_listing_them() {
         let _lock = TEST_LOCK.lock().unwrap();
-        let mut ctx = setup();
+        let ctx = setup();
         ctx.sc_create("/mydir", FileType::Directory, FilePermissions::ReadWrite)
             .unwrap();
         ctx.sc_create(
@@ -904,7 +904,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            list_dir(&mut ctx, "/mydir/subdir"),
+            list_dir(&ctx, "/mydir/subdir"),
             vec!["file_in_subdir".to_owned()]
         );
     }
@@ -912,7 +912,7 @@ mod tests {
     #[test]
     fn stating_file() {
         let _lock = TEST_LOCK.lock().unwrap();
-        let mut proc = setup();
+        let proc = setup();
 
         let root_stat = proc.sc_stat("/").unwrap();
         assert_eq!(root_stat.size, 0);
@@ -930,7 +930,7 @@ mod tests {
     #[test]
     fn opening_and_closing_file() {
         let _lock = TEST_LOCK.lock().unwrap();
-        let mut proc = setup();
+        let proc = setup();
         proc.sc_create("/myfile", FileType::Regular, FilePermissions::ReadWrite)
             .unwrap();
         let fd = proc.sc_open("/myfile", OpenFlags::empty(), None).unwrap();
@@ -940,7 +940,7 @@ mod tests {
     #[test]
     fn writing_seeking_and_reading() {
         let _lock = TEST_LOCK.lock().unwrap();
-        let mut proc = setup();
+        let proc = setup();
         proc.sc_create("/myfile", FileType::Regular, FilePermissions::ReadWrite)
             .unwrap();
         let fd = proc.sc_open("/myfile", OpenFlags::empty(), None).unwrap();
@@ -957,14 +957,14 @@ mod tests {
         assert_eq!(n, 0);
     }
 
-    fn list_dir(ctx: &mut ProcessHandle, path: &str) -> Vec<String> {
+    fn list_dir(ctx: &ProcessHandle, path: &str) -> Vec<String> {
         let fd = ctx.sc_open(path, OpenFlags::empty(), None).unwrap();
         let dents = ctx.sc_getdents(fd).unwrap();
         ctx.sc_close(fd).unwrap();
         dents.into_iter().map(|e| e.name).collect()
     }
 
-    fn assert_dir_contains(ctx: &mut ProcessHandle, dir_path: &str, child_name: &str) {
+    fn assert_dir_contains(ctx: &ProcessHandle, dir_path: &str, child_name: &str) {
         let listing = list_dir(ctx, dir_path);
         assert!(
             listing.contains(&child_name.to_owned()),
@@ -976,41 +976,41 @@ mod tests {
     #[test]
     fn changing_current_working_directory() {
         let _lock = TEST_LOCK.lock().unwrap();
-        let mut proc = setup();
+        let proc = setup();
         proc.sc_create("/dir", FileType::Directory, FilePermissions::ReadWrite)
             .unwrap();
         proc.sc_create("dir/x", FileType::Regular, FilePermissions::ReadWrite)
             .unwrap();
         proc.sc_chdir("/dir").unwrap();
-        assert_eq!(list_dir(&mut proc, "."), vec!["x"]);
-        assert!(list_dir(&mut proc, "..").contains(&"dir".to_owned()));
+        assert_eq!(list_dir(&proc, "."), vec!["x"]);
+        assert!(list_dir(&proc, "..").contains(&"dir".to_owned()));
     }
 
     #[test]
     fn rename_moving_file_between_directories() {
         let _lock = TEST_LOCK.lock().unwrap();
-        let mut proc = setup();
+        let proc = setup();
         proc.sc_create("/myfile", FileType::Regular, FilePermissions::ReadWrite)
             .unwrap();
-        assert!(list_dir(&mut proc, "/").contains(&"myfile".to_owned()));
+        assert!(list_dir(&proc, "/").contains(&"myfile".to_owned()));
 
         proc.sc_create("/dir", FileType::Directory, FilePermissions::ReadWrite)
             .unwrap();
         proc.sc_rename("/myfile", "/dir/moved").unwrap();
 
-        assert!(!list_dir(&mut proc, "/").contains(&"myfile".to_owned()));
-        assert_eq!(list_dir(&mut proc, "/dir"), vec!["moved"]);
+        assert!(!list_dir(&proc, "/").contains(&"myfile".to_owned()));
+        assert_eq!(list_dir(&proc, "/dir"), vec!["moved"]);
     }
 
     #[test]
     fn rename_with_relative_paths() {
         let _lock = TEST_LOCK.lock().unwrap();
-        let mut proc = setup();
+        let proc = setup();
         proc.sc_create("/myfile", FileType::Regular, FilePermissions::ReadWrite)
             .unwrap();
 
         proc.sc_rename("myfile", "new_name").unwrap();
 
-        assert_dir_contains(&mut proc, "/", "new_name");
+        assert_dir_contains(&proc, "/", "new_name");
     }
 }

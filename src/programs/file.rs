@@ -1,51 +1,44 @@
-use crate::sys::{OpenFlags, ProcessHandle};
+use crate::programs::file_helpers::FileReader;
+use crate::sys::ProcessHandle;
 use crate::util::FileType;
+
 pub fn run_file_proc(mut handle: ProcessHandle, args: Vec<String>) {
+    let (code, message) = _run_file_proc(&mut handle, args);
+    handle
+        .sc_write(1, format!("{}\n", message).as_bytes())
+        .unwrap();
+    handle.sc_exit(code);
+}
+
+pub fn _run_file_proc(handle: &mut ProcessHandle, args: Vec<String>) -> (u32, String) {
     let path = match args.get(1) {
         None => {
-            handle.sc_write(1, "Missing path arg\n".as_bytes()).unwrap();
-            handle.sc_exit(1);
-            return;
+            return (1, "Missing path arg".to_owned());
         }
         Some(path) => path,
     };
 
-    let fd = match handle.sc_open(path, OpenFlags::empty(), None) {
+    let mut reader = match FileReader::open(handle, path) {
         Err(e) => {
-            handle
-                .sc_write(1, format!("Failed to open {}: {}\n", path, e).as_bytes())
-                .unwrap();
-            handle.sc_exit(1);
-            return;
+            return (1, format!("Failed to open {}: {}\n", path, e));
         }
-        Ok(fd) => fd,
+        Ok(r) => r,
     };
 
-    match handle
-        .sc_stat(path)
-        .expect("Stat should work now")
-        .file_type
-    {
+    match reader.stat().expect("Stat should work now").file_type {
         FileType::Directory => {
-            handle.sc_write(1, "Directory\n".as_bytes()).unwrap();
-            return;
+            return (0, "Directory".to_owned());
         }
         FileType::CharacterDevice => {
-            handle.sc_write(1, "Character device\n".as_bytes()).unwrap();
-            return;
+            return (0, "Character device".to_owned());
         }
         _ => {}
     }
 
     let mut buf = [0; 1024];
-
-    let n = match handle.sc_read(fd, &mut buf) {
+    let n = match reader.read(&mut buf) {
         Err(e) => {
-            handle
-                .sc_write(1, format!("Failed to read {}: {}\n", path, e).as_bytes())
-                .unwrap();
-            handle.sc_exit(1);
-            return;
+            return (1, format!("Failed to read {}: {}", path, e));
         }
         Ok(n) => n,
     };
@@ -53,23 +46,16 @@ pub fn run_file_proc(mut handle: ProcessHandle, args: Vec<String>) {
     let n = n.expect("TODO: handle blocking file read");
 
     if n == 0 {
-        handle.sc_write(1, "Empty file\n".as_bytes()).unwrap();
-        return;
+        return (0, "Empty file".to_owned());
     }
 
     if buf.starts_with(&[0xD, 0xE, 0xA, 0xD, 0xB, 0xE, 0xE, 0xF]) {
-        handle
-            .sc_write(1, "Executable program\n".as_bytes())
-            .unwrap();
-        return;
+        return (0, "Executable program".to_owned());
     }
 
     if std::str::from_utf8(&buf[..n]).is_ok() {
-        handle.sc_write(1, "UTF-8 text\n".as_bytes()).unwrap();
-        return;
+        return (0, "UTF-8 text".to_owned());
     }
 
-    handle
-        .sc_write(1, "Unknown file format\n".as_bytes())
-        .unwrap();
+    (0, "Unknown file format".to_owned())
 }

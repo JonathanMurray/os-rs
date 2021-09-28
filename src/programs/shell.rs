@@ -1,3 +1,4 @@
+use crate::programs::file_helpers::FileReader;
 use crate::sys::{
     IoctlRequest, OpenFlags, ProcessHandle, ProcessResult, SpawnAction, SpawnFds, SpawnUid,
     WaitPidOptions, WaitPidTarget,
@@ -196,30 +197,22 @@ impl ShellProcess {
     }
 
     fn _cat_file(&mut self, path: &str) -> Result<()> {
-        let fd = self.handle.sc_open(path, OpenFlags::empty(), None)?;
+        let mut f = FileReader::open(&self.handle, path)?;
         let mut buf = vec![0; 1024];
         loop {
-            let n = match self.handle.sc_read(fd, &mut buf) {
-                Ok(Some(n)) => n,
+            match f.read(&mut buf) {
+                Ok(Some(0)) => break,
+                Ok(Some(n)) => stdout(&self.handle, String::from_utf8_lossy(&buf[..n]))?,
                 Ok(None) => {
                     println!("WARN: Reading this would block.");
-                    0
+                    break;
                 }
                 Err(e) => {
-                    if let Err(e) = self.handle.sc_close(fd) {
-                        println!("WARN: Failed to close after failing to read: {}", e);
-                    }
                     return Err(e);
                 }
-            };
-            if n > 0 {
-                let s = String::from_utf8_lossy(&buf[..n]);
-                self.stdout(s)?;
-            } else {
-                break;
             }
         }
-        self.handle.sc_close(fd)
+        Ok(())
     }
 
     fn ls(&mut self, args: &[&str]) -> Result<()> {
@@ -245,6 +238,7 @@ impl ShellProcess {
             self.stdoutln(output)?;
         } else {
             let dir_fd = self.handle.sc_open(path, OpenFlags::empty(), None)?;
+            //TODO We leak fd if getdents fails. Move this to a util class (FileReader)?
             let dir_entries = self.handle.sc_getdents(dir_fd)?;
             for dir_entry in dir_entries {
                 let child_name = dir_entry.name;
@@ -351,26 +345,10 @@ impl ShellProcess {
     }
 
     fn ps(&mut self, _args: &[&str]) -> Result<()> {
-        let fd = self
-            .handle
-            .sc_open("/proc/status", OpenFlags::empty(), None)?;
-
-        //TODO read arbitrarily large file
-        let mut buf = vec![0; 2048];
-        //TODO if reading fails, we leak the FD
-        let n_read = self
-            .handle
-            .sc_read(fd, &mut buf)?
-            .expect("shouldn't need to block on proc");
-
-        assert!(
-            n_read < buf.len(),
-            "Filled whole buffer when readingproc/status file: {:?}",
-            String::from_utf8_lossy(&buf[..])
-        );
-
-        let content = String::from_utf8_lossy(&buf[..n_read]);
+        let mut f = FileReader::open(&self.handle, "/proc/status")?;
+        let content = f.read_to_string()?;
         let mut lines = content.lines();
+        f.close();
 
         lines.next(); // uptime
         lines.next(); // number of processes
@@ -387,8 +365,6 @@ impl ShellProcess {
             );
             self.stdoutln(output)?;
         }
-
-        self.handle.sc_close(fd)?;
 
         Ok(())
     }
@@ -428,17 +404,17 @@ impl ShellProcess {
 
     fn stdoutln(&mut self, s: impl Display) -> Result<()> {
         let output = format!("{}\n", s);
-        self.stdout(output)
+        stdout(&self.handle, output)
     }
+}
 
-    fn stdout(&mut self, s: impl Display) -> Result<()> {
-        let output = format!("{}", s);
-        let n_written = self.handle.sc_write(1, output.as_bytes())?;
-        assert_eq!(
-            n_written,
-            output.len(),
-            "We didn't write all the output to stdout"
-        );
-        Ok(())
-    }
+fn stdout(handle: &ProcessHandle, s: impl Display) -> Result<()> {
+    let output = format!("{}", s);
+    let n_written = handle.sc_write(1, output.as_bytes())?;
+    assert_eq!(
+        n_written,
+        output.len(),
+        "We didn't write all the output to stdout"
+    );
+    Ok(())
 }

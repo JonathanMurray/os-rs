@@ -13,6 +13,7 @@ use std::time::Duration;
 use crate::devfs::DevFilesystem;
 use crate::programs::background;
 use crate::programs::file;
+use crate::programs::file_helpers::FileReader;
 use crate::programs::shell::ShellProcess;
 use crate::sys::{
     OpenFlags, ProcessHandle, SpawnAction, SpawnFds, SpawnUid, System, WaitPidOptions,
@@ -183,7 +184,7 @@ fn create_program_file(handle: &mut ProcessHandle, path: &str, program_name: &st
     handle.sc_close(fd)
 }
 
-fn run_new_proc(mut handle: ProcessHandle) {
+fn run_new_proc(handle: ProcessHandle) {
     let args = handle.clone_args();
     let name = &args[0];
 
@@ -193,14 +194,11 @@ fn run_new_proc(mut handle: ProcessHandle) {
         return;
     }
 
-    let fd = handle.sc_open(name, OpenFlags::empty(), None).unwrap();
-    //TODO: introduce a file abstraction that makes these things easier
-    let mut buf = vec![0; 1024];
-    let n_read = handle.sc_read(fd, &mut buf).unwrap().unwrap();
-    handle.sc_close(fd).unwrap();
-    assert!(n_read < buf.len(), "We may not have read the full file");
+    let mut f = FileReader::open(&handle, name).unwrap();
+    let buf = f.read_fully().unwrap();
+    f.close();
 
-    match &buf[..n_read].strip_prefix(PROGRAM_MAGIC_CODE) {
+    match &buf[..].strip_prefix(PROGRAM_MAGIC_CODE) {
         None => {
             eprintln!("Not an executable: {}.", name);
             handle.sc_exit(2);
