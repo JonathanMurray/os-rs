@@ -49,7 +49,7 @@ pub fn _run_file_proc(handle: &mut ProcessHandle, args: Vec<String>) -> (u32, St
         return (0, "Empty file".to_owned());
     }
 
-    if buf.starts_with(&[0xD, 0xE, 0xA, 0xD, 0xB, 0xE, 0xE, 0xF]) {
+    if buf.starts_with(&[0xDE, 0xAD, 0xBE, 0xEF]) {
         return (0, "Executable program".to_owned());
     }
 

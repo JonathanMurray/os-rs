@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use crate::devfs::DevFilesystem;
 use crate::programs::background;
+use crate::programs::dump;
 use crate::programs::file;
 use crate::programs::file_helpers::FileReader;
 use crate::programs::shell::ShellProcess;
@@ -26,7 +27,7 @@ use crate::vfs::VirtualFilesystemSwitch;
 
 type Result<T> = std::result::Result<T, String>;
 
-const PROGRAM_MAGIC_CODE: &[u8] = &[0xD, 0xE, 0xA, 0xD, 0xB, 0xE, 0xE, 0xF];
+const PROGRAM_MAGIC_CODE: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF];
 
 #[tokio::main]
 pub async fn main() {
@@ -103,6 +104,7 @@ fn run_init_proc(mut handle: ProcessHandle, liveness_checker: Arc<()>) {
     create_program_file(&mut handle, "/bin/shell", "shell").unwrap();
     create_program_file(&mut handle, "/bin/file", "file").unwrap();
     create_program_file(&mut handle, "/bin/touch", "touch").unwrap();
+    create_program_file(&mut handle, "/bin/dump", "dump").unwrap();
     let log_fd = handle
         .sc_open("/dev/log", OpenFlags::empty(), None)
         .unwrap();
@@ -217,6 +219,7 @@ fn run_new_proc(handle: ProcessHandle) {
             Ok("sleep\n") => run_sleep_proc(handle),
             Ok("file\n") => file::run_file_proc(handle, args),
             Ok("touch\n") => utils::run_touch_proc(handle, args),
+            Ok("dump\n") => dump::run_dump_proc(handle, args),
             _ => {
                 eprintln!("Not a valid executable: {}. ({:?})", name, rest);
                 handle.sc_exit(2);

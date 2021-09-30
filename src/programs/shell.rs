@@ -197,11 +197,14 @@ impl ShellProcess {
 
     fn _cat_file(&mut self, path: &str) -> Result<()> {
         let mut f = FileReader::open(&self.handle, path)?;
+        //TODO: implement this with sc_sendfile instead
         let mut buf = vec![0; 1024];
         loop {
             match f.read(&mut buf) {
                 Ok(Some(0)) => break,
-                Ok(Some(n)) => self.handle.stdout(String::from_utf8_lossy(&buf[..n]))?,
+                Ok(Some(n)) => {
+                    self.handle.sc_write(1, &buf[..n])?;
+                }
                 Ok(None) => {
                     println!("WARN: Reading this would block.");
                     break;
