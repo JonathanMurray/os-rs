@@ -7,6 +7,7 @@ use bitflags::bitflags;
 use once_cell::sync::Lazy;
 
 use std::collections::{HashMap, LinkedList};
+use std::fmt::Display;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -310,6 +311,17 @@ impl ProcessHandle {
             }
         };
         Some(self)
+    }
+
+    pub fn stdout(&self, s: impl Display) -> Result<()> {
+        let output = format!("{}", s);
+        let n_written = self.sc_write(1, output.as_bytes())?;
+        assert_eq!(
+            n_written,
+            output.len(),
+            "We didn't write all the output to stdout"
+        );
+        Ok(())
     }
 
     pub fn sc_getpid(&self) -> Pid {

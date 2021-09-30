@@ -54,13 +54,10 @@ impl<'a> FileReader<'a> {
     }
 
     pub fn _ensure_closed(&mut self) {
-        match self.fd.take() {
-            Some(fd) => {
-                if let Err(e) = self.handle.sc_close(fd) {
-                    println!("WARN: Failed to close {} (fd: {}): {}", self.path, fd, e);
-                }
+        if let Some(fd) = self.fd.take() {
+            if let Err(e) = self.handle.sc_close(fd) {
+                println!("WARN: Failed to close {} (fd: {}): {}", self.path, fd, e);
             }
-            None => {} // Already closed
         }
     }
 }

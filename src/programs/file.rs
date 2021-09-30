@@ -20,7 +20,7 @@ pub fn _run_file_proc(handle: &mut ProcessHandle, args: Vec<String>) -> (u32, St
 
     let mut reader = match FileReader::open(handle, path) {
         Err(e) => {
-            return (1, format!("Failed to open {}: {}\n", path, e));
+            return (1, format!("Failed to open {}: {}", path, e));
         }
         Ok(r) => r,
     };

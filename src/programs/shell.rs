@@ -141,7 +141,6 @@ impl ShellProcess {
             "cat" => self.cat(tokens),
             "ls" => self.ls(tokens),
             "ll" => self.ll(tokens),
-            "touch" => self.touch(tokens),
             "mkdir" => self.mkdir(tokens),
             "rm" => self.rm(tokens),
             "mv" => self.mv(tokens),
@@ -202,7 +201,7 @@ impl ShellProcess {
         loop {
             match f.read(&mut buf) {
                 Ok(Some(0)) => break,
-                Ok(Some(n)) => stdout(&self.handle, String::from_utf8_lossy(&buf[..n]))?,
+                Ok(Some(n)) => self.handle.stdout(String::from_utf8_lossy(&buf[..n]))?,
                 Ok(None) => {
                     println!("WARN: Reading this would block.");
                     break;
@@ -250,14 +249,6 @@ impl ShellProcess {
             }
             self.handle.sc_close(dir_fd)?;
         }
-        Ok(())
-    }
-
-    fn touch(&mut self, args: &[&str]) -> Result<()> {
-        let path = args.get(1).ok_or_else(|| "missing arg".to_owned())?;
-        self.handle
-            .sc_create(*path, FileType::Regular, FilePermissions::ReadWrite)?;
-        self.stdoutln("File created")?;
         Ok(())
     }
 
@@ -404,17 +395,6 @@ impl ShellProcess {
 
     fn stdoutln(&mut self, s: impl Display) -> Result<()> {
         let output = format!("{}\n", s);
-        stdout(&self.handle, output)
+        self.handle.stdout(output)
     }
-}
-
-fn stdout(handle: &ProcessHandle, s: impl Display) -> Result<()> {
-    let output = format!("{}", s);
-    let n_written = handle.sc_write(1, output.as_bytes())?;
-    assert_eq!(
-        n_written,
-        output.len(),
-        "We didn't write all the output to stdout"
-    );
-    Ok(())
 }

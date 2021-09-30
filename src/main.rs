@@ -15,6 +15,8 @@ use crate::programs::background;
 use crate::programs::file;
 use crate::programs::file_helpers::FileReader;
 use crate::programs::shell::ShellProcess;
+use crate::programs::utils;
+
 use crate::sys::{
     OpenFlags, ProcessHandle, SpawnAction, SpawnFds, SpawnUid, System, WaitPidOptions,
     WaitPidTarget, GLOBAL_PROCESS_TABLE,
@@ -100,6 +102,7 @@ fn run_init_proc(mut handle: ProcessHandle, liveness_checker: Arc<()>) {
     create_program_file(&mut handle, "/bin/background", "background").unwrap();
     create_program_file(&mut handle, "/bin/shell", "shell").unwrap();
     create_program_file(&mut handle, "/bin/file", "file").unwrap();
+    create_program_file(&mut handle, "/bin/touch", "touch").unwrap();
     let log_fd = handle
         .sc_open("/dev/log", OpenFlags::empty(), None)
         .unwrap();
@@ -189,7 +192,9 @@ fn run_new_proc(handle: ProcessHandle) {
     let name = &args[0];
 
     if let Err(err) = handle.sc_stat(name) {
-        eprintln!("did not find {}: {}", name, err);
+        handle
+            .stdout(format!("Couldn't run {}: {}\n", name, err))
+            .unwrap();
         handle.sc_exit(1);
         return;
     }
@@ -200,7 +205,9 @@ fn run_new_proc(handle: ProcessHandle) {
 
     match &buf[..].strip_prefix(PROGRAM_MAGIC_CODE) {
         None => {
-            eprintln!("Not an executable: {}.", name);
+            handle
+                .stdout(format!("{} is not an executable\n", name))
+                .unwrap();
             handle.sc_exit(2);
         }
         Some(rest) => match std::str::from_utf8(rest) {
@@ -209,6 +216,7 @@ fn run_new_proc(handle: ProcessHandle) {
             Ok("shell\n") => ShellProcess::new(handle).run(),
             Ok("sleep\n") => run_sleep_proc(handle),
             Ok("file\n") => file::run_file_proc(handle, args),
+            Ok("touch\n") => utils::run_touch_proc(handle, args),
             _ => {
                 eprintln!("Not a valid executable: {}. ({:?})", name, rest);
                 handle.sc_exit(2);
