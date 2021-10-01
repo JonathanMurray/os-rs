@@ -643,6 +643,40 @@ impl ProcessHandle {
         Ok(num_written)
     }
 
+    pub fn sc_sendfile(&self, out_fd: Fd, in_fd: Fd, count: usize) -> Result<Option<usize>> {
+        let mut active_context = ActiveProcessHandle::new(self);
+        let (in_file_id, out_file_id) = {
+            let mut processes = active_context.process_table();
+            let proc = processes.current();
+            proc.log
+                .push(format!("sendfile({:?}, {:?}, {}))", out_fd, in_fd, count));
+
+            (proc.find_open_file(in_fd)?, proc.find_open_file(out_fd)?)
+        };
+
+        let mut buf = vec![0; count];
+
+        let n_read = match active_context.sys.vfs.read_file(in_file_id, &mut buf)? {
+            Some(n) => n,
+            None => {
+                // Reading would block
+                return Ok(None);
+            }
+        };
+
+        let n_written = active_context
+            .sys
+            .vfs
+            .write_file(out_file_id, &buf[0..n_read])?;
+
+        assert_eq!(
+            n_read, n_written,
+            "Not all data was written. We need to handle this!"
+        );
+
+        Ok(Some(n_read))
+    }
+
     pub fn sc_seek(&self, fd: Fd, offset: usize) -> Result<()> {
         let mut active_context = ActiveProcessHandle::new(self);
         let mut processes = active_context.process_table();
