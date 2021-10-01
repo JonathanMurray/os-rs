@@ -117,7 +117,7 @@ impl ProcFilesystem {
                 },
                 file_type: FileType::Directory,
                 size: 0,
-                permissions: FilePermissions::ReadOnly,
+                permissions: FilePermissions::new(7, 5),
                 user_id: Uid(0),
             }),
             1 => Ok(Inode {
@@ -131,7 +131,7 @@ impl ProcFilesystem {
                 },
                 file_type: FileType::Regular,
                 size: 0,
-                permissions: FilePermissions::ReadOnly,
+                permissions: FilePermissions::new(7, 4),
                 user_id: Uid(0),
             }),
             _ => {
@@ -151,7 +151,7 @@ impl ProcFilesystem {
                             },
                             file_type: FileType::Regular,
                             size: 0,
-                            permissions: FilePermissions::ReadOnly,
+                            permissions: FilePermissions::new(7, 4),
                             user_id: Uid(0),
                         });
                     }

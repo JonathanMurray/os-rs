@@ -120,7 +120,7 @@ impl ShellProcess {
                 let file_fd = self.handle.sc_open(
                     f,
                     OpenFlags::CREATE | OpenFlags::TRUNCATE,
-                    Some(FilePermissions::ReadWrite),
+                    Some(FilePermissions::new(7, 7)),
                 )?;
                 self.handle.sc_dup2(file_fd, 1)?; // redirect stdout to file
                 self.handle.sc_close(file_fd)?;
@@ -171,18 +171,12 @@ impl ShellProcess {
             FileType::CharacterDevice => "device",
         }
         .to_owned();
-        let permissions = match stat.permissions {
-            FilePermissions::ReadOnly => "r-",
-            FilePermissions::ReadWrite => "rw",
-        }
-        .to_owned();
-
         let size = format!("{} bytes", stat.size);
         format!(
-            "{:>7} {:>10} {:>4} {:>10} {:<13}",
+            "{:>7} {:>10}  {} {:>10} {:<13}",
             format!("{:?}", stat.user_id),
             file_type,
-            permissions,
+            stat.permissions,
             size,
             format!(
                 "[{:?}:{}]",
@@ -253,7 +247,7 @@ impl ShellProcess {
     fn mkdir(&mut self, args: &[&str]) -> Result<()> {
         let path = args.get(1).ok_or_else(|| "missing arg".to_owned())?;
         self.handle
-            .sc_create(*path, FileType::Directory, FilePermissions::ReadWrite)?;
+            .sc_create(*path, FileType::Directory, FilePermissions::new(7, 7))?;
         self.stdoutln("Directory created")?;
         Ok(())
     }

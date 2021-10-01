@@ -920,7 +920,7 @@ mod tests {
     fn creating_file() {
         let _lock = TEST_LOCK.lock().unwrap();
         let ctx = setup();
-        ctx.sc_create("/myfile", FileType::Regular, FilePermissions::ReadWrite)
+        ctx.sc_create("/myfile", FileType::Regular, FilePermissions::new(7, 7))
             .unwrap();
     }
 
@@ -928,24 +928,24 @@ mod tests {
     fn creating_files_and_listing_them() {
         let _lock = TEST_LOCK.lock().unwrap();
         let ctx = setup();
-        ctx.sc_create("/mydir", FileType::Directory, FilePermissions::ReadWrite)
+        ctx.sc_create("/mydir", FileType::Directory, FilePermissions::new(7, 7))
             .unwrap();
         ctx.sc_create(
             "/mydir/subdir",
             FileType::Directory,
-            FilePermissions::ReadWrite,
+            FilePermissions::new(7, 7),
         )
         .unwrap();
         ctx.sc_create(
             "/mydir/file_in_dir",
             FileType::Regular,
-            FilePermissions::ReadWrite,
+            FilePermissions::new(7, 7),
         )
         .unwrap();
         ctx.sc_create(
             "/mydir/subdir/file_in_subdir",
             FileType::Regular,
-            FilePermissions::ReadWrite,
+            FilePermissions::new(7, 7),
         )
         .unwrap();
 
@@ -964,7 +964,7 @@ mod tests {
         assert_eq!(root_stat.size, 0);
         assert_eq!(root_stat.file_type, FileType::Directory);
 
-        proc.sc_create("/myfile", FileType::Regular, FilePermissions::ReadWrite)
+        proc.sc_create("/myfile", FileType::Regular, FilePermissions::new(7, 7))
             .unwrap();
         assert_eq!(proc.sc_stat("/myfile").unwrap().size, 0);
 
@@ -977,7 +977,7 @@ mod tests {
     fn opening_and_closing_file() {
         let _lock = TEST_LOCK.lock().unwrap();
         let proc = setup();
-        proc.sc_create("/myfile", FileType::Regular, FilePermissions::ReadWrite)
+        proc.sc_create("/myfile", FileType::Regular, FilePermissions::new(7, 7))
             .unwrap();
         let fd = proc.sc_open("/myfile", OpenFlags::empty(), None).unwrap();
         proc.sc_close(fd).unwrap();
@@ -987,7 +987,7 @@ mod tests {
     fn writing_seeking_and_reading() {
         let _lock = TEST_LOCK.lock().unwrap();
         let proc = setup();
-        proc.sc_create("/myfile", FileType::Regular, FilePermissions::ReadWrite)
+        proc.sc_create("/myfile", FileType::Regular, FilePermissions::new(7, 7))
             .unwrap();
         let fd = proc.sc_open("/myfile", OpenFlags::empty(), None).unwrap();
         proc.sc_write(fd, &[0, 10, 20, 30]).unwrap();
@@ -1023,9 +1023,9 @@ mod tests {
     fn changing_current_working_directory() {
         let _lock = TEST_LOCK.lock().unwrap();
         let proc = setup();
-        proc.sc_create("/dir", FileType::Directory, FilePermissions::ReadWrite)
+        proc.sc_create("/dir", FileType::Directory, FilePermissions::new(7, 7))
             .unwrap();
-        proc.sc_create("dir/x", FileType::Regular, FilePermissions::ReadWrite)
+        proc.sc_create("dir/x", FileType::Regular, FilePermissions::new(7, 7))
             .unwrap();
         proc.sc_chdir("/dir").unwrap();
         assert_eq!(list_dir(&proc, "."), vec!["x"]);
@@ -1036,11 +1036,11 @@ mod tests {
     fn rename_moving_file_between_directories() {
         let _lock = TEST_LOCK.lock().unwrap();
         let proc = setup();
-        proc.sc_create("/myfile", FileType::Regular, FilePermissions::ReadWrite)
+        proc.sc_create("/myfile", FileType::Regular, FilePermissions::new(7, 7))
             .unwrap();
         assert!(list_dir(&proc, "/").contains(&"myfile".to_owned()));
 
-        proc.sc_create("/dir", FileType::Directory, FilePermissions::ReadWrite)
+        proc.sc_create("/dir", FileType::Directory, FilePermissions::new(7, 7))
             .unwrap();
         proc.sc_rename("/myfile", "/dir/moved").unwrap();
 
@@ -1052,7 +1052,7 @@ mod tests {
     fn rename_with_relative_paths() {
         let _lock = TEST_LOCK.lock().unwrap();
         let proc = setup();
-        proc.sc_create("/myfile", FileType::Regular, FilePermissions::ReadWrite)
+        proc.sc_create("/myfile", FileType::Regular, FilePermissions::new(7, 7))
             .unwrap();
 
         proc.sc_rename("myfile", "new_name").unwrap();

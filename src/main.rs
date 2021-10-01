@@ -95,7 +95,7 @@ fn run_init_proc(mut handle: ProcessHandle, liveness_checker: Arc<()>) {
         .expect("/dev/null must exist for stdout");
 
     handle
-        .sc_create("/bin", FileType::Directory, FilePermissions::ReadOnly)
+        .sc_create("/bin", FileType::Directory, FilePermissions::new(7, 5))
         .unwrap();
 
     create_program_file(&mut handle, "/bin/script", "script").unwrap();
@@ -178,7 +178,7 @@ fn run_init_proc(mut handle: ProcessHandle, liveness_checker: Arc<()>) {
 }
 
 fn create_program_file(handle: &mut ProcessHandle, path: &str, program_name: &str) -> Result<()> {
-    let fd = handle.sc_open(path, OpenFlags::CREATE, Some(FilePermissions::ReadWrite))?;
+    let fd = handle.sc_open(path, OpenFlags::CREATE, Some(FilePermissions::new(7, 5)))?;
     //TODO we leak the FD if write fails
     let mut content = Vec::new();
     content.extend(PROGRAM_MAGIC_CODE);

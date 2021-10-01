@@ -67,7 +67,7 @@ impl RegularFilesystem {
             id: root_inode_id,
             file_type: FileType::Directory,
             size: 0,
-            permissions: FilePermissions::ReadOnly,
+            permissions: FilePermissions::new(7, 5),
             user_id: Uid(0),
         };
 
@@ -121,6 +121,8 @@ impl RegularFilesystem {
         //TODO remove directory / regular file
         //TODO if someone has an open file, don't delete it in such a way that
         // read/writes start failing for that process
+
+        // TODO: check permissions
         self.inodes.remove(&inode_number);
         Ok(())
     }

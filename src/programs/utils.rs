@@ -17,7 +17,7 @@ pub fn run_touch_proc(mut handle: ProcessHandle, args: Vec<String>) {
 
 fn _run_touch_proc(handle: &mut ProcessHandle, args: Vec<String>) -> Result<()> {
     let path = args.get(1).ok_or_else(|| "missing arg".to_owned())?;
-    handle.sc_create(path, FileType::Regular, FilePermissions::ReadWrite)?;
+    handle.sc_create(path, FileType::Regular, FilePermissions::new(7, 7))?;
     handle.stdout("File created\n")?;
     Ok(())
 }

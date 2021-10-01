@@ -36,7 +36,7 @@ impl DevFilesystem {
             parent_id: parent_inode_id,
             file_type: FileType::Directory,
             size: 0,
-            permissions: FilePermissions::ReadOnly,
+            permissions: FilePermissions::new(7, 5),
             user_id,
         };
         let log_inode = Inode {
@@ -47,7 +47,7 @@ impl DevFilesystem {
             parent_id: root_inode.id,
             file_type: FileType::CharacterDevice,
             size: 0,
-            permissions: FilePermissions::ReadWrite,
+            permissions: FilePermissions::new(7, 4),
             user_id,
         };
         let null_inode = Inode {
@@ -58,7 +58,7 @@ impl DevFilesystem {
             parent_id: root_inode.id,
             file_type: FileType::CharacterDevice,
             size: 0,
-            permissions: FilePermissions::ReadWrite,
+            permissions: FilePermissions::new(7, 4),
             user_id,
         };
         let terminal_inode = Inode {
@@ -69,7 +69,7 @@ impl DevFilesystem {
             parent_id: root_inode.id,
             file_type: FileType::CharacterDevice,
             size: 0,
-            permissions: FilePermissions::ReadWrite,
+            permissions: FilePermissions::new(7, 4),
             user_id,
         };
 

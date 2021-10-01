@@ -1,3 +1,6 @@
+use std::fmt;
+use std::fmt::Display;
+
 //TODO: Make all these into value structs?
 
 /// inode number. Only unique per filesystem
@@ -26,9 +29,30 @@ pub enum FileType {
 }
 
 #[derive(PartialEq, Debug, Copy, Clone)]
-pub enum FilePermissions {
-    ReadWrite,
-    ReadOnly,
+pub struct FilePermissions {
+    user: u8,
+    others: u8,
+}
+
+impl FilePermissions {
+    pub fn new(user: u8, others: u8) -> Self {
+        assert!(user < 8, "Must be a 3-bit number");
+        assert!(others < 8, "Must be a 3-bit number");
+        Self { user, others }
+    }
+}
+
+impl Display for FilePermissions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut s = String::with_capacity(6);
+        s.push(if self.user & 4 != 0 { 'r' } else { '-' });
+        s.push(if self.user & 2 != 0 { 'w' } else { '-' });
+        s.push(if self.user & 1 != 0 { 'x' } else { '-' });
+        s.push(if self.others & 4 != 0 { 'r' } else { '-' });
+        s.push(if self.others & 2 != 0 { 'w' } else { '-' });
+        s.push(if self.others & 1 != 0 { 'x' } else { '-' });
+        write!(f, "{}", s)
+    }
 }
 
 #[derive(PartialEq, Debug)]

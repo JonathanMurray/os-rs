@@ -13,7 +13,7 @@ pub fn run_background_proc(mut sys: ProcessHandle) {
         .sc_open(
             "uptime",
             OpenFlags::CREATE,
-            Some(FilePermissions::ReadWrite),
+            Some(FilePermissions::new(7, 4)),
         )
         .expect("Open uptime file");
     eprintln!("background proc opened uptime file with fd: {}", fd);
@@ -40,7 +40,7 @@ pub fn run_background_proc(mut sys: ProcessHandle) {
 }
 
 fn create_text_file(handle: &mut ProcessHandle, path: &str, content: &str) -> Result<()> {
-    let fd = handle.sc_open(path, OpenFlags::CREATE, Some(FilePermissions::ReadWrite))?;
+    let fd = handle.sc_open(path, OpenFlags::CREATE, Some(FilePermissions::new(7, 4)))?;
     //TODO we leak the FD if write fails
     let content = content.as_bytes();
     let n_written = handle.sc_write(fd, content)?;
