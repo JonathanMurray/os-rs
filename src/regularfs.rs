@@ -1,3 +1,4 @@
+use std::collections::hash_map;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use std::sync::MutexGuard;
@@ -122,9 +123,24 @@ impl RegularFilesystem {
         //TODO if someone has an open file, don't delete it in such a way that
         // read/writes start failing for that process
 
-        // TODO: check permissions
-        self.inodes.remove(&inode_number);
-        Ok(())
+        match self.inodes.entry(inode_number) {
+            hash_map::Entry::Occupied(e) => {
+                let mut processes = lock_global_process_table();
+                let uid = processes.current().uid;
+                let inode = e.get();
+                let is_owner = uid == inode.user_id;
+                let permissions = inode.permissions;
+
+                let allowed = (is_owner && permissions.owner_write()) || permissions.others_write();
+                if allowed {
+                    e.remove();
+                    Ok(())
+                } else {
+                    Err("Not allowed".to_owned())
+                }
+            }
+            hash_map::Entry::Vacant(_) => Err("No such inode".to_owned()),
+        }
     }
 
     fn directory_mut(&mut self, inode_number: Ino) -> Result<&mut Directory> {

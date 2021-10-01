@@ -30,24 +30,32 @@ pub enum FileType {
 
 #[derive(PartialEq, Debug, Copy, Clone)]
 pub struct FilePermissions {
-    user: u8,
+    owner: u8,
     others: u8,
 }
 
 impl FilePermissions {
-    pub fn new(user: u8, others: u8) -> Self {
-        assert!(user < 8, "Must be a 3-bit number");
+    pub fn new(owner: u8, others: u8) -> Self {
+        assert!(owner < 8, "Must be a 3-bit number");
         assert!(others < 8, "Must be a 3-bit number");
-        Self { user, others }
+        Self { owner, others }
+    }
+
+    pub fn owner_write(&self) -> bool {
+        self.owner & 2 != 0
+    }
+
+    pub fn others_write(&self) -> bool {
+        self.others & 2 != 0
     }
 }
 
 impl Display for FilePermissions {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut s = String::with_capacity(6);
-        s.push(if self.user & 4 != 0 { 'r' } else { '-' });
-        s.push(if self.user & 2 != 0 { 'w' } else { '-' });
-        s.push(if self.user & 1 != 0 { 'x' } else { '-' });
+        s.push(if self.owner & 4 != 0 { 'r' } else { '-' });
+        s.push(if self.owner & 2 != 0 { 'w' } else { '-' });
+        s.push(if self.owner & 1 != 0 { 'x' } else { '-' });
         s.push(if self.others & 4 != 0 { 'r' } else { '-' });
         s.push(if self.others & 2 != 0 { 'w' } else { '-' });
         s.push(if self.others & 1 != 0 { 'x' } else { '-' });
