@@ -168,7 +168,7 @@ impl ShellProcess {
         let file_type = match stat.file_type {
             FileType::Regular => "file",
             FileType::Directory => "directory",
-            FileType::CharacterDevice => "character device",
+            FileType::CharacterDevice => "device",
         }
         .to_owned();
         let permissions = match stat.permissions {
@@ -179,7 +179,8 @@ impl ShellProcess {
 
         let size = format!("{} bytes", stat.size);
         format!(
-            "{:>10} {:>4} {:>10} {:<13}",
+            "{:>7} {:>10} {:>4} {:>10} {:<13}",
+            format!("{:?}", stat.user_id),
             file_type,
             permissions,
             size,

@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
+use std::sync::MutexGuard;
 
-use crate::sys::IoctlRequest;
+use crate::sys::{GlobalProcessTable, IoctlRequest, GLOBAL_PROCESS_TABLE};
 use crate::util::{
     DirectoryEntry, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier,
-    OpenFileId,
+    OpenFileId, Uid,
 };
 use crate::vfs::Filesystem;
 
@@ -12,6 +13,11 @@ type Result<T> = core::result::Result<T, String>;
 
 type Directory = HashMap<String, InodeIdentifier>;
 type RegularFile = Vec<u8>;
+
+fn lock_global_process_table() -> MutexGuard<'static, GlobalProcessTable> {
+    // LOCKING: VFS must never be accessed while holding this lock
+    GLOBAL_PROCESS_TABLE.lock().unwrap()
+}
 
 #[derive(Debug)]
 enum FileContent {
@@ -62,6 +68,7 @@ impl RegularFilesystem {
             file_type: FileType::Directory,
             size: 0,
             permissions: FilePermissions::ReadOnly,
+            user_id: Uid(0),
         };
 
         let next_inode_number = root_inode.id.number + 1;
@@ -88,6 +95,9 @@ impl RegularFilesystem {
         permissions: FilePermissions,
         parent_id: InodeIdentifier,
     ) -> Ino {
+        let mut processes = lock_global_process_table();
+        let user_id = processes.current().uid;
+
         let inode_number = self.next_inode_number;
         self.next_inode_number += 1;
         let inode = Inode {
@@ -99,6 +109,7 @@ impl RegularFilesystem {
             file_type,
             size: 0,
             permissions,
+            user_id,
         };
         self.inodes.insert(inode_number, inode);
         self.files.insert(inode_number, File::new(file_type));

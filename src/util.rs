@@ -37,6 +37,7 @@ pub struct FileStat {
     pub size: usize,
     pub permissions: FilePermissions,
     pub inode_id: InodeIdentifier,
+    pub user_id: Uid,
 }
 
 #[derive(PartialEq, Debug)]
@@ -59,6 +60,7 @@ pub struct Inode {
     pub file_type: FileType,
     pub size: usize,
     pub permissions: FilePermissions,
+    pub user_id: Uid,
 }
 
 impl Inode {

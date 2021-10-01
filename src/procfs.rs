@@ -6,7 +6,7 @@ use std::time::Instant;
 use crate::sys::{GlobalProcessTable, IoctlRequest, GLOBAL_PROCESS_TABLE};
 use crate::util::{
     DirectoryEntry, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier,
-    OpenFileId, Pid,
+    OpenFileId, Pid, Uid,
 };
 use crate::vfs::Filesystem;
 
@@ -118,6 +118,7 @@ impl ProcFilesystem {
                 file_type: FileType::Directory,
                 size: 0,
                 permissions: FilePermissions::ReadOnly,
+                user_id: Uid(0),
             }),
             1 => Ok(Inode {
                 parent_id: InodeIdentifier {
@@ -131,6 +132,7 @@ impl ProcFilesystem {
                 file_type: FileType::Regular,
                 size: 0,
                 permissions: FilePermissions::ReadOnly,
+                user_id: Uid(0),
             }),
             _ => {
                 if inode_number >= 1000 {
@@ -150,6 +152,7 @@ impl ProcFilesystem {
                             file_type: FileType::Regular,
                             size: 0,
                             permissions: FilePermissions::ReadOnly,
+                            user_id: Uid(0),
                         });
                     }
                 }

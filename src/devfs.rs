@@ -1,7 +1,7 @@
 use crate::sys::{IoctlRequest, GLOBAL_PROCESS_TABLE};
 use crate::util::{
     DirectoryEntry, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier,
-    OpenFileId, Pid,
+    OpenFileId, Pid, Uid,
 };
 use crate::vfs::Filesystem;
 
@@ -18,7 +18,7 @@ pub struct DevFilesystem {
     null_inode: Inode,
     terminal_inode: Inode,
     terminal_input: Arc<Mutex<Vec<u8>>>,
-    terminal_foreground_pid: Pid,
+    terminal_foreground_pid: Option<Pid>,
 }
 
 //TODO Instead of tracking each individual inode in every
@@ -26,7 +26,8 @@ pub struct DevFilesystem {
 //encapsulate the behaviour of a specific device?
 
 impl DevFilesystem {
-    pub fn new(parent_inode_id: InodeIdentifier, terminal_foreground_pid: Pid) -> Self {
+    pub fn new(parent_inode_id: InodeIdentifier) -> Self {
+        let user_id = Uid(0);
         let root_inode = Inode {
             id: InodeIdentifier {
                 filesystem_id: FilesystemId::Dev,
@@ -36,6 +37,7 @@ impl DevFilesystem {
             file_type: FileType::Directory,
             size: 0,
             permissions: FilePermissions::ReadOnly,
+            user_id,
         };
         let log_inode = Inode {
             id: InodeIdentifier {
@@ -46,6 +48,7 @@ impl DevFilesystem {
             file_type: FileType::CharacterDevice,
             size: 0,
             permissions: FilePermissions::ReadWrite,
+            user_id,
         };
         let null_inode = Inode {
             id: InodeIdentifier {
@@ -56,6 +59,7 @@ impl DevFilesystem {
             file_type: FileType::CharacterDevice,
             size: 0,
             permissions: FilePermissions::ReadWrite,
+            user_id,
         };
         let terminal_inode = Inode {
             id: InodeIdentifier {
@@ -66,6 +70,7 @@ impl DevFilesystem {
             file_type: FileType::CharacterDevice,
             size: 0,
             permissions: FilePermissions::ReadWrite,
+            user_id,
         };
 
         Self {
@@ -75,7 +80,7 @@ impl DevFilesystem {
             null_inode,
             terminal_inode,
             terminal_input: Arc::new(Mutex::new(Default::default())),
-            terminal_foreground_pid,
+            terminal_foreground_pid: None,
         }
     }
 
@@ -93,7 +98,7 @@ impl Filesystem for DevFilesystem {
         match req {
             IoctlRequest::SetTerminalForegroundProcess(pid) => match inode_number {
                 3 => {
-                    self.terminal_foreground_pid = pid;
+                    self.terminal_foreground_pid = Some(pid);
                     Ok(())
                 }
                 _ => Err("Fd does not support ioctl".to_owned()),
@@ -195,7 +200,7 @@ impl Filesystem for DevFilesystem {
             2 => Ok(Some(0)),
             3 => {
                 let mut processes = GLOBAL_PROCESS_TABLE.lock().unwrap();
-                if processes.current().pid == self.terminal_foreground_pid {
+                if Some(processes.current().pid) == self.terminal_foreground_pid {
                     let mut terminal_input = self.terminal_input.lock().unwrap();
                     let mut cursor = Cursor::new(&terminal_input[..]);
                     let n = cursor

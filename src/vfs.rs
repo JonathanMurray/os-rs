@@ -236,6 +236,7 @@ impl VirtualFilesystemSwitch {
             size: inode.size,
             permissions,
             inode_id: inode.id,
+            user_id: inode.user_id,
         })
     }
 
