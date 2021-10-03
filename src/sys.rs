@@ -13,6 +13,8 @@ use std::time::Duration;
 
 type Result<T> = core::result::Result<T, String>;
 
+pub struct ProcessWasKilledPanic;
+
 // NOTE: Take care when using this!
 // 1. Don't hold onto this lock while using the VFS. ProcFS may block
 // waiting for the lock to be released.
@@ -30,6 +32,7 @@ pub static GLOBAL_PROCESS_TABLE: Lazy<Mutex<GlobalProcessTable>> = Lazy::new(|| 
 pub static GLOBAL_PROCESS_SPAWN_QUEUE: Lazy<Mutex<LinkedList<ProcessHandle>>> =
     Lazy::new(Default::default);
 
+#[derive(Debug)]
 pub struct GlobalProcessTable {
     next_pid: Pid,
     processes: HashMap<Pid, Process>,
@@ -85,7 +88,17 @@ impl GlobalProcessTable {
 #[derive(Debug, PartialEq)]
 pub enum ProcessResult {
     ExitCode(u32),
-    Killed,
+    Killed(Signal),
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub enum Signal {
+    Kill,
+    Interrupt,
+}
+
+pub trait SignalHandler: Send + std::fmt::Debug {
+    fn handle(&self, signal: Signal);
 }
 
 #[derive(Debug)]
@@ -100,7 +113,7 @@ pub struct Process {
     pub log: Vec<String>,
     pub state: ProcessState,
     result: Option<ProcessResult>,
-    incoming_kill_signals: LinkedList<()>,
+    pending_signals: LinkedList<Signal>,
 }
 
 impl Process {
@@ -134,7 +147,7 @@ impl Process {
             log: vec![],
             state: ProcessState::Running,
             result: None,
-            incoming_kill_signals: Default::default(),
+            pending_signals: Default::default(),
         }
     }
 
@@ -210,22 +223,13 @@ impl Process {
         self.ensure_zombified(result);
     }
 
-    fn handle_kill_signal(&mut self) -> bool {
-        if self.incoming_kill_signals.pop_back().is_some() {
-            eprintln!(
-                "{:?} got a kill signal and will now zombify itself",
-                self.pid
-            );
-            self.zombify(ProcessResult::Killed);
-            true
-        } else {
-            false
-        }
-    }
-
     // TODO: feels iffy that this is public. Used from devfs
-    pub fn kill_signal(&mut self) {
-        self.incoming_kill_signals.push_front(());
+    pub fn signal(&mut self, signal: Signal) {
+        self.pending_signals.push_front(signal);
+        eprintln!(
+            "DEBUG: pushed signal to pending signal queue: {:?}",
+            self.pending_signals
+        );
     }
 }
 
@@ -259,6 +263,7 @@ impl System {
         ProcessHandle {
             shared_sys: sys,
             pid,
+            signal_handlers: Default::default(),
         }
     }
 
@@ -271,22 +276,13 @@ impl System {
     }
 }
 
-fn close_zombies_fds(mut active_handle: ActiveProcessHandle, pid: Pid) {
-    let mut processes = active_handle.process_table();
-    let process = processes.process(pid).unwrap();
-    let fds = process.take_fds();
-    //Release lock before using VFS
-    drop(processes);
-    eprintln!("Closing zombie fds: {:?}", fds);
-    active_handle.sys.close_files(fds.into_values());
-}
-
 #[derive(Debug)]
 pub struct ProcessHandle {
     // Prefer to use sys from ActiveProcessHandle
     // to avoid potential deadlocks
     shared_sys: Arc<Mutex<System>>,
     pid: Pid,
+    signal_handlers: Mutex<HashMap<Signal, Box<dyn SignalHandler>>>,
 }
 
 impl ProcessHandle {
@@ -300,22 +296,46 @@ impl ProcessHandle {
         self.pid
     }
 
-    pub fn handle_signals(self) -> Option<Self> {
+    // TODO
+    pub fn sc_sigaction(&self, signal: Signal, handler: Box<dyn SignalHandler>) {
+        let _active_handle = ActiveProcessHandle::new(self);
+        self.signal_handlers.lock().unwrap().insert(signal, handler);
+        //https://man7.org/linux/man-pages/man2/sigaction.2.html
+        //int sigaction(int signum, const struct sigaction *restrict act,
+        //             struct sigaction *restrict oldact);
+    }
+
+    pub fn handle_signals(&self) {
+        //TODO if a child process dies, the parent should be notified with a signal?
+        let active_handle = ActiveProcessHandle::new(self);
+        self._handle_signals(active_handle);
+    }
+
+    fn _handle_signals(&self, mut active_handle: ActiveProcessHandle) {
+        let mut processes = active_handle.process_table();
         let pid = self.pid;
-        {
-            let active_handle = ActiveProcessHandle::new(&self);
-            let mut processes = active_handle.process_table();
-            let process = processes.process(pid).expect("This process must exist");
-            let killed = process.handle_kill_signal();
-            //Release process lock before using VFS
-            drop(processes);
-            if killed {
-                eprintln!("{:?} was killed", pid);
-                close_zombies_fds(active_handle, pid);
-                return None;
+        let process = processes.current();
+        if let Some(signal) = process.pending_signals.pop_back() {
+            if let Some(handler) = self.signal_handlers.lock().unwrap().get(&signal) {
+                // Drop locks before invoking custom handler, to avoid deadlock
+                drop(processes);
+                drop(active_handle);
+                handler.handle(signal);
+            } else {
+                match signal {
+                    Signal::Kill | Signal::Interrupt => {
+                        process.zombify(ProcessResult::Killed(signal));
+                        //Release process lock before using VFS
+                        drop(processes);
+                        active_handle.close_zombies_fds(pid);
+                        drop(active_handle);
+                        // Drop before panic, so we don't poison locks
+                        eprintln!("Panicking due to process killed in handle_signals");
+                        std::panic::panic_any(ProcessWasKilledPanic);
+                    }
+                }
             }
-        };
-        Some(self)
+        }
     }
 
     pub fn stdout(&self, s: impl Display) -> Result<()> {
@@ -330,6 +350,7 @@ impl ProcessHandle {
     }
 
     pub fn sc_getpid(&self) -> Pid {
+        //TODO log
         self.pid
     }
 
@@ -404,7 +425,7 @@ impl ProcessHandle {
 
     pub fn sc_exit(self, code: u32) {
         let self_pid = self.pid;
-        let active_handle = ActiveProcessHandle::new(&self);
+        let mut active_handle = ActiveProcessHandle::new(&self);
 
         let mut processes = active_handle.process_table();
 
@@ -415,7 +436,7 @@ impl ProcessHandle {
         // Release process lock before using VFS
         drop(processes);
 
-        close_zombies_fds(active_handle, self_pid);
+        active_handle.close_zombies_fds(self_pid);
     }
 
     pub fn sc_wait_pid(
@@ -469,11 +490,13 @@ impl ProcessHandle {
                 processes.current().state = ProcessState::Running;
                 return Ok(None);
             }
+            drop(processes);
+
+            self._handle_signals(active_context);
         }
     }
 
-    pub fn sc_kill(&self, pid: Pid) -> Result<()> {
-        //we only support SIGKILL for now.
+    pub fn sc_kill(&self, pid: Pid, signal: Signal) -> Result<()> {
         let active_context = ActiveProcessHandle::new(self);
         let mut processes = active_context.process_table();
         let current_proc = processes.current();
@@ -493,7 +516,7 @@ impl ProcessHandle {
                 victim_proc.uid
             ));
         }
-        victim_proc.kill_signal();
+        victim_proc.signal(signal);
         Ok(())
     }
 
@@ -614,6 +637,7 @@ impl ProcessHandle {
 
     pub fn sc_read(&self, fd: Fd, buf: &mut [u8]) -> Result<Option<usize>> {
         let mut active_context = ActiveProcessHandle::new(self);
+
         let open_file_id = {
             let mut processes = active_context.process_table();
             let proc = processes.current();
@@ -627,8 +651,9 @@ impl ProcessHandle {
 
     pub fn sc_write(&self, fd: Fd, buf: &[u8]) -> Result<usize> {
         //TODO permissions
-
+        //
         let mut active_context = ActiveProcessHandle::new(self);
+
         let open_file_id = {
             let mut processes = active_context.process_table();
             let proc = processes.current();
@@ -867,6 +892,16 @@ impl<'a> ActiveProcessHandle<'a> {
     fn process_table(&self) -> MutexGuard<'_, GlobalProcessTable> {
         // LOCKING: System is locked - we own a MutexGuard
         GLOBAL_PROCESS_TABLE.lock().unwrap()
+    }
+
+    fn close_zombies_fds(&mut self, pid: Pid) {
+        let mut processes = self.process_table();
+        let process = processes.process(pid).unwrap();
+        let fds = process.take_fds();
+        //Release lock before using VFS
+        drop(processes);
+        eprintln!("Closing zombie fds: {:?}", fds);
+        self.sys.close_files(fds.into_values());
     }
 }
 

@@ -19,11 +19,7 @@ pub fn run_background_proc(mut sys: ProcessHandle) {
     eprintln!("background proc opened uptime file with fd: {}", fd);
     let mut secs = 0_u64;
     for _ in 0..50 {
-        sys = if let Some(h) = sys.handle_signals() {
-            h
-        } else {
-            return;
-        };
+        sys.handle_signals();
 
         std::thread::sleep(Duration::from_secs(1));
         secs += 1;

@@ -1,4 +1,4 @@
-use crate::sys::{IoctlRequest, GLOBAL_PROCESS_TABLE};
+use crate::sys::{IoctlRequest, Signal, GLOBAL_PROCESS_TABLE};
 use crate::util::{
     DirectoryEntry, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier,
     OpenFileId, Pid, Uid,
@@ -110,16 +110,13 @@ impl TerminalInputFeeder {
     pub fn interrupt(&mut self) {
         eprintln!("DEBUG: devfs received interrupt");
 
-        // TODO send an INT signal. Not a kill.
-        // If a shell is currently the foreground process
-        // it may not want to exit as a reaction to signal
-        // but just jump to a a new line.
-        // Other processes may want to exit.
-
-        let pid = self.foreground_pid.lock().unwrap();
-        let pid = pid.expect("There should be a foreground process by now");
         let mut processes = GLOBAL_PROCESS_TABLE.lock().unwrap();
-        processes.process(pid).unwrap().kill_signal();
+
+        let pid = *self.foreground_pid.lock().unwrap();
+
+        let pid = pid.expect("There should be a foreground process by now");
+
+        processes.process(pid).unwrap().signal(Signal::Interrupt);
     }
 }
 
@@ -234,7 +231,8 @@ impl Filesystem for DevFilesystem {
             2 => Ok(Some(0)),
             3 => {
                 let mut processes = GLOBAL_PROCESS_TABLE.lock().unwrap();
-                let pid = self.terminal_foreground_pid.lock().unwrap();
+
+                let pid = *self.terminal_foreground_pid.lock().unwrap();
                 if pid.as_ref() == Some(&processes.current().pid) {
                     let mut terminal_input = self.terminal_input.lock().unwrap();
                     let mut cursor = Cursor::new(&terminal_input[..]);

@@ -1,46 +1,68 @@
 use crate::programs::file_helpers::FileReader;
 use crate::sys::{
-    IoctlRequest, OpenFlags, ProcessHandle, ProcessResult, SpawnAction, SpawnFds, SpawnUid,
-    WaitPidOptions, WaitPidTarget,
+    IoctlRequest, OpenFlags, ProcessHandle, ProcessResult, Signal, SignalHandler, SpawnAction,
+    SpawnFds, SpawnUid, WaitPidOptions, WaitPidTarget,
 };
 use crate::util::{FilePermissions, FileStat, FileType, Pid};
 
 use std::collections::HashSet;
 use std::fmt::Display;
 use std::str::FromStr;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 type Result<T> = core::result::Result<T, String>;
 
 pub struct ShellProcess {
     background_processes: HashSet<Pid>,
-    handle: ProcessHandle,
+    handle: Arc<ProcessHandle>,
     has_requested_exit: bool,
+}
+
+#[derive(Debug)]
+struct SigintHandler(Weak<ProcessHandle>);
+
+impl SignalHandler for SigintHandler {
+    fn handle(&self, signal: Signal) {
+        if let Some(handle) = self.0.upgrade() {
+            handle.stdout("\n").unwrap();
+            ShellProcess::print_prompt(&handle);
+        } else {
+            panic!(
+                "WARN: Signal handler was invoked after the shell had been dropped ({:?})",
+                signal
+            );
+        }
+    }
 }
 
 impl ShellProcess {
     pub fn new(handle: ProcessHandle) -> Self {
         Self {
             background_processes: Default::default(),
-            handle,
+            handle: Arc::new(handle),
             has_requested_exit: false,
         }
     }
 
     pub fn run(mut self) {
-        self.handle.stdout("Welcome!\n").unwrap();
+        // We hand over a weak clone of the process handle to our handler function.
+        // The handler function should never be used after the shell has exited.
+        let weak_process_handle = Arc::downgrade(&self.handle);
+        self.handle.sc_sigaction(
+            Signal::Interrupt,
+            Box::new(SigintHandler(weak_process_handle)),
+        );
 
-        self.print_prompt();
+        self.handle.stdout("Welcome!\n").unwrap();
+        ShellProcess::print_prompt(&self.handle);
+
         let mut buf = [0; 1024];
         let mut buffered_lines: Vec<String> = Vec::new();
         let mut current_line: Vec<u8> = Vec::new();
         while !self.has_requested_exit {
             let n = loop {
-                self.handle = if let Some(h) = self.handle.handle_signals() {
-                    h
-                } else {
-                    return;
-                };
+                self.handle.handle_signals();
 
                 match self.handle.sc_read(0, &mut buf) {
                     Ok(Some(n)) => break n,
@@ -50,8 +72,7 @@ impl ShellProcess {
                     }
                     Err(e) => {
                         println!("WARN: Shell failed to read stdin: {}", e);
-                        self.handle.sc_exit(1);
-                        return;
+                        return self.do_exit(1);
                     }
                 };
             };
@@ -73,21 +94,26 @@ impl ShellProcess {
             for line in buffered_lines {
                 eprintln!("DEBUG: COMPLETED SHELL LINE: '{}'", line);
                 self.handle_input(line.to_owned());
-                self.print_prompt();
+                ShellProcess::print_prompt(&self.handle);
             }
             buffered_lines = Vec::new();
         }
 
         self.handle.stdout("Bye!\n").unwrap();
-        self.handle.sc_exit(0);
+        self.do_exit(0);
     }
 
-    fn print_prompt(&mut self) {
-        let current_dir_name = self
-            .handle
+    fn do_exit(self, status: u32) {
+        let handle = Arc::try_unwrap(self.handle)
+            .expect("There should be only one strong reference (owned by this shell)");
+        handle.sc_exit(status);
+    }
+
+    fn print_prompt(handle: &ProcessHandle) {
+        let current_dir_name = handle
             .sc_get_current_dir_name()
             .expect("Must have valid cwd");
-        self.handle
+        handle
             .stdout(&format!("{}$ ", current_dir_name.as_str()))
             .expect("Write to stdout");
     }
@@ -306,7 +332,7 @@ impl ShellProcess {
         let pid = args.get(1).ok_or_else(|| "missing arg".to_owned())?;
         let pid = u32::from_str(*pid).map_err(|_| "Not a valid pid".to_owned())?;
         let pid = Pid(pid);
-        self.handle.sc_kill(pid)
+        self.handle.sc_kill(pid, Signal::Kill)
     }
 
     fn dynamic_program(&mut self, args: &[&str], run_in_background: bool) -> Result<()> {

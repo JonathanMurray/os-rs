@@ -23,8 +23,8 @@ use crate::programs::file_helpers::FileReader;
 use crate::programs::shell::ShellProcess;
 use crate::programs::utils;
 use crate::sys::{
-    OpenFlags, ProcessHandle, SpawnAction, SpawnFds, SpawnUid, System, WaitPidOptions,
-    WaitPidTarget, GLOBAL_PROCESS_TABLE,
+    OpenFlags, ProcessHandle, ProcessWasKilledPanic, SpawnAction, SpawnFds, SpawnUid, System,
+    WaitPidOptions, WaitPidTarget, GLOBAL_PROCESS_TABLE,
 };
 use crate::util::{FilePermissions, FileType, InodeIdentifier, Pid, Uid};
 use crate::vfs::VirtualFilesystemSwitch;
@@ -59,9 +59,12 @@ pub async fn main() {
     };
 
     let sys = System::new(vfs);
-    let init_handle = spawn_init_proc(sys, root_inode_id);
-    let init_pid = init_handle.pid();
-    let init_fut = tokio::task::spawn_blocking(move || run_init_proc(init_handle));
+
+    let init_pid = Pid(0);
+    let init_fut = tokio::task::spawn_blocking(move || {
+        let init_handle = spawn_init_proc(init_pid, sys, root_inode_id);
+        run_init_proc(init_handle)
+    });
 
     // fuse needed for select
     let terminal_driver_fut = terminal_driver_fut.fuse();
@@ -84,8 +87,19 @@ pub async fn main() {
                         Ok(_) => {}
                         Err(join_error) => {
                             if let Ok(reason) = join_error.try_into_panic() {
-                                println!("A thread crashed: {:?} ({:?}) - Will shut down operating system.", thread_id, reason);
-                                should_shut_down = true;
+                                if reason.downcast_ref::<ProcessWasKilledPanic>().is_some() {
+                                    eprintln!("A process was killed: {:?}", thread_id);
+                                } else {
+                                    let reason = if let Some(s) = reason.downcast_ref::<&str>() {
+                                        s
+                                    } else if let Some(s) = reason.downcast_ref::<String>() {
+                                        s
+                                    } else {
+                                        ""
+                                    };
+                                    println!("A thread crashed: {:?} ({}) - Will shut down operating system.", thread_id, reason);
+                                    should_shut_down = true;
+                                }
                             }
                         }
                     }
@@ -96,7 +110,7 @@ pub async fn main() {
                         }
                         ThreadId::Pid(pid) => {
                             if *pid == init_pid {
-                                eprintln!("Init process exited.");
+                                println!("Init process exited.");
                                 should_shut_down = true;
                             }
                         }
@@ -133,7 +147,7 @@ pub async fn main() {
     }
 
     println!();
-    eprintln!("Operating system shutting down.");
+    println!("Shutting down.");
     std::process::exit(0);
 }
 
@@ -143,16 +157,15 @@ enum ThreadId {
     TerminalDriver,
 }
 
-fn spawn_init_proc(sys: System, root_inode_id: InodeIdentifier) -> ProcessHandle {
+fn spawn_init_proc(pid: Pid, sys: System, root_inode_id: InodeIdentifier) -> ProcessHandle {
     let sys = Arc::new(Mutex::new(sys));
 
-    let init_pid = Pid(0);
     let processes = GLOBAL_PROCESS_TABLE.lock().unwrap();
     System::spawn_process(
         processes,
         sys,
         vec!["init".to_owned()],
-        init_pid,
+        pid,
         Uid(0),
         (None, None),
         root_inode_id,
@@ -195,18 +208,14 @@ fn run_init_proc(mut handle: ProcessHandle) {
         )
         .unwrap();
 
+    // TODO Install a signal handler for SIGCHLD:
+    // if pid of child == shell, then we exit
+
     handle
         .sc_write(log_fd, "Init starting...\n".as_bytes())
         .unwrap();
     loop {
-        handle = match handle.handle_signals() {
-            Some(handle) => handle,
-            None => {
-                println!("WARN: Init process was killed");
-                return;
-            }
-        };
-
+        handle.handle_signals();
         let script = handle
             .sc_spawn(
                 vec!["/bin/script".to_owned()],
@@ -240,6 +249,7 @@ fn run_init_proc(mut handle: ProcessHandle) {
                 None,
             )
             .expect("spawn sleep from init");
+        eprintln!("Init::waitpid...");
         handle
             .sc_wait_pid(WaitPidTarget::Pid(sleep), WaitPidOptions::Default)
             .unwrap();
@@ -310,14 +320,11 @@ fn run_program_proc(handle: ProcessHandle) {
     }
 }
 
-fn run_sleep_proc(mut handle: ProcessHandle) {
-    for _ in 0..5 {
-        handle = if let Some(h) = handle.handle_signals() {
-            h
-        } else {
-            return;
-        };
-
+fn run_sleep_proc(handle: ProcessHandle) {
+    // TODO do this with syscall so that kernel can
+    // handle any pending signals
+    for _ in 0..50 {
+        handle.handle_signals();
         std::thread::sleep(Duration::from_millis(100));
     }
 
@@ -328,13 +335,9 @@ fn run_sleep_proc(mut handle: ProcessHandle) {
     handle.sc_exit(0);
 }
 
-fn run_script_proc(mut handle: ProcessHandle) {
+fn run_script_proc(handle: ProcessHandle) {
     for _ in 0..5 {
-        handle = if let Some(h) = handle.handle_signals() {
-            h
-        } else {
-            return;
-        };
+        handle.handle_signals();
         std::thread::sleep(Duration::from_secs(1));
     }
     handle.sc_exit(0);

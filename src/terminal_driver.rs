@@ -1,4 +1,5 @@
 use crate::devfs::TerminalInputFeeder;
+use crate::sys::GLOBAL_PROCESS_TABLE;
 
 use std::io;
 use std::io::Write;
@@ -57,6 +58,10 @@ impl TerminalDriver {
         }
 
         eprintln!("Terminal driver exiting.");
+
+        // Reset terminal from raw mode.
+        drop(stdout);
+        std::process::exit(0);
     }
 
     fn handle_input(
@@ -77,6 +82,12 @@ impl TerminalDriver {
                     write!(stdout, "QUITTING\r\n").unwrap();
                     stdout.lock().flush().unwrap();
                     return true;
+                }
+
+                Key::Ctrl('p') => {
+                    //TODO
+                    write!(stdout, "\r\nDUMPING PROCESS TABLE\r\n").unwrap();
+                    write!(stdout, "{:?}\r\n", GLOBAL_PROCESS_TABLE).unwrap();
                 }
 
                 Key::Ctrl('a') => {
@@ -142,7 +153,10 @@ impl TerminalDriver {
     }
 
     fn handle_output(&mut self, stdout: &mut RawTerminal<std::io::Stdout>) {
+        //eprintln!("terminal locking from_kernel...");
         let mut output = self.from_kernel.lock().unwrap();
+        //eprintln!("terminal got from_kernel");
+
         let str_output = String::from_utf8_lossy(&output[..]);
         if !str_output.is_empty() {
             eprintln!(
