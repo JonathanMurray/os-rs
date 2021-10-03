@@ -18,7 +18,8 @@ pub struct DevFilesystem {
     null_inode: Inode,
     terminal_inode: Inode,
     terminal_input: Arc<Mutex<Vec<u8>>>,
-    terminal_foreground_pid: Option<Pid>,
+    terminal_output: Arc<Mutex<Vec<u8>>>,
+    terminal_foreground_pid: Arc<Mutex<Option<Pid>>>,
 }
 
 //TODO Instead of tracking each individual inode in every
@@ -26,7 +27,11 @@ pub struct DevFilesystem {
 //encapsulate the behaviour of a specific device?
 
 impl DevFilesystem {
-    pub fn new(parent_inode_id: InodeIdentifier) -> Self {
+    pub fn new(
+        parent_inode_id: InodeIdentifier,
+        terminal_input: Arc<Mutex<Vec<u8>>>,
+        terminal_output: Arc<Mutex<Vec<u8>>>,
+    ) -> Self {
         let user_id = Uid(0);
         let root_inode = Inode {
             id: InodeIdentifier {
@@ -79,13 +84,42 @@ impl DevFilesystem {
             log_inode,
             null_inode,
             terminal_inode,
-            terminal_input: Arc::new(Mutex::new(Default::default())),
-            terminal_foreground_pid: None,
+            terminal_input,
+            terminal_output,
+            terminal_foreground_pid: Arc::new(Mutex::new(None)),
         }
     }
 
-    pub fn kernel_terminal_input_writer(&self) -> Arc<Mutex<Vec<u8>>> {
-        Arc::clone(&self.terminal_input)
+    pub fn terminal_input_feeder(&self) -> TerminalInputFeeder {
+        TerminalInputFeeder {
+            buf: Arc::clone(&self.terminal_input),
+            foreground_pid: Arc::clone(&self.terminal_foreground_pid),
+        }
+    }
+}
+
+pub struct TerminalInputFeeder {
+    buf: Arc<Mutex<Vec<u8>>>,
+    foreground_pid: Arc<Mutex<Option<Pid>>>,
+}
+impl TerminalInputFeeder {
+    pub fn bytes(&mut self, buf: &[u8]) {
+        self.buf.lock().unwrap().extend(buf);
+    }
+
+    pub fn interrupt(&mut self) {
+        eprintln!("DEBUG: devfs received interrupt");
+
+        // TODO send an INT signal. Not a kill.
+        // If a shell is currently the foreground process
+        // it may not want to exit as a reaction to signal
+        // but just jump to a a new line.
+        // Other processes may want to exit.
+
+        let pid = self.foreground_pid.lock().unwrap();
+        let pid = pid.expect("There should be a foreground process by now");
+        let mut processes = GLOBAL_PROCESS_TABLE.lock().unwrap();
+        processes.process(pid).unwrap().kill_signal();
     }
 }
 
@@ -98,7 +132,7 @@ impl Filesystem for DevFilesystem {
         match req {
             IoctlRequest::SetTerminalForegroundProcess(pid) => match inode_number {
                 3 => {
-                    self.terminal_foreground_pid = Some(pid);
+                    *self.terminal_foreground_pid.lock().unwrap() = Some(pid);
                     Ok(())
                 }
                 _ => Err("Fd does not support ioctl".to_owned()),
@@ -200,7 +234,8 @@ impl Filesystem for DevFilesystem {
             2 => Ok(Some(0)),
             3 => {
                 let mut processes = GLOBAL_PROCESS_TABLE.lock().unwrap();
-                if Some(processes.current().pid) == self.terminal_foreground_pid {
+                let pid = self.terminal_foreground_pid.lock().unwrap();
+                if pid.as_ref() == Some(&processes.current().pid) {
                     let mut terminal_input = self.terminal_input.lock().unwrap();
                     let mut cursor = Cursor::new(&terminal_input[..]);
                     let n = cursor
@@ -208,6 +243,7 @@ impl Filesystem for DevFilesystem {
                         .map_err(|e| format!("Failed to read: {}", e))?;
                     terminal_input.drain(0..n);
                     if n > 0 {
+                        eprintln!("DEBUG: devfs read terminal input: '{:?}'", &buf[..n]);
                         Ok(Some(n))
                     } else {
                         //TODO: should we use async processes instead and return a Future
@@ -239,7 +275,8 @@ impl Filesystem for DevFilesystem {
                 Ok(buf.len())
             }
             3 => {
-                print!("{}", String::from_utf8_lossy(buf));
+                eprintln!("DEBUG devfs terminal write: {:?}", buf);
+                self.terminal_output.lock().unwrap().extend(buf);
                 Ok(buf.len())
             }
             _ => Err("No such file".to_owned()),

@@ -7,7 +7,6 @@ use crate::util::{FilePermissions, FileStat, FileType, Pid};
 
 use std::collections::HashSet;
 use std::fmt::Display;
-use std::io::{self, Write};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -29,19 +28,13 @@ impl ShellProcess {
     }
 
     pub fn run(mut self) {
-        let pid = self.handle.sc_getpid();
-        println!("Welcome!");
-        let mut stdout = io::stdout();
+        self.handle.stdout("Welcome!\n").unwrap();
 
+        self.print_prompt();
         let mut buf = [0; 1024];
+        let mut buffered_lines: Vec<String> = Vec::new();
+        let mut current_line: Vec<u8> = Vec::new();
         while !self.has_requested_exit {
-            let current_dir_name = self
-                .handle
-                .sc_get_current_dir_name()
-                .expect("Must have valid cwd");
-            eprintln!("{:?} printing prompt", pid);
-            print!("{}$ ", current_dir_name.as_str());
-            stdout.flush().unwrap();
             let n = loop {
                 self.handle = if let Some(h) = self.handle.handle_signals() {
                     h
@@ -62,24 +55,48 @@ impl ShellProcess {
                     }
                 };
             };
-            assert!(
-                n < buf.len(),
-                "We filled the buffer. We may have missed some input"
-            );
-            let input = std::str::from_utf8(&buf[..n]).expect("UTF8 stdin");
 
-            self.handle_input(input.to_owned());
+            // Try to build up lines from the data we received
+            let mut left = 0;
+            for right in 0..n {
+                if buf[right] == b'\n' {
+                    current_line.extend(&buf[left..right + 1]);
+                    left = right + 1;
+                    buffered_lines.push(String::from_utf8(current_line).expect("UTF8 stdin line"));
+                    current_line = Vec::new();
+                } else if right == n - 1 {
+                    current_line.extend(&buf[left..right + 1]);
+                }
+            }
+
+            // Handle any completed lines
+            for line in buffered_lines {
+                eprintln!("DEBUG: COMPLETED SHELL LINE: '{}'", line);
+                self.handle_input(line.to_owned());
+                self.print_prompt();
+            }
+            buffered_lines = Vec::new();
         }
 
-        println!("Bye!");
+        self.handle.stdout("Bye!\n").unwrap();
         self.handle.sc_exit(0);
+    }
+
+    fn print_prompt(&mut self) {
+        let current_dir_name = self
+            .handle
+            .sc_get_current_dir_name()
+            .expect("Must have valid cwd");
+        self.handle
+            .stdout(&format!("{}$ ", current_dir_name.as_str()))
+            .expect("Write to stdout");
     }
 
     fn handle_input(&mut self, input: String) {
         let tokens: Vec<&str> = input.split_whitespace().collect();
         if !tokens.is_empty() {
             if let Err(e) = self.handle_tokenized_input(tokens) {
-                println!("Error: {}", e);
+                self.handle.stdout(format!("Error: {}\n", e)).unwrap();
             }
         }
         self.check_finished_background_tasks();
@@ -92,7 +109,9 @@ impl ShellProcess {
             .expect("Wait for background tasks")
         {
             self.background_processes.remove(&pid);
-            println!("[{}] finished: {:?}", pid.0, result);
+            self.handle
+                .stdout(format!("[{}] finished: {:?}\n", pid.0, result))
+                .unwrap();
         }
     }
 
@@ -152,6 +171,7 @@ impl ShellProcess {
             "pid" => self.pid(tokens),
             "echo" => self.echo(tokens),
             "exit" => self.exit(tokens),
+            "crash" => self.crash(tokens),
             _ => self.dynamic_program(tokens, run_in_background),
         }
     }
@@ -296,7 +316,9 @@ impl ShellProcess {
             let child_pid =
                 self.handle
                     .sc_spawn(args, SpawnFds::Inherit, SpawnUid::Inherit, None)?;
-            println!("[{}] running in background...", child_pid.0);
+            self.handle
+                .stdout(format!("[{}] running in background...\n", child_pid.0))
+                .unwrap();
             self.background_processes.insert(child_pid);
         } else {
             let terminal_fd = self
@@ -315,7 +337,9 @@ impl ShellProcess {
             match result.unwrap() {
                 (_, ProcessResult::ExitCode(0)) => {}
                 (child_pid, bad_result) => {
-                    println!("[{}]: {:?}", child_pid.0, bad_result);
+                    self.handle
+                        .stdout(format!("[{}]: {:?}\n", child_pid.0, bad_result))
+                        .unwrap();
                 }
             }
             let pid = self.handle.sc_getpid();
@@ -383,6 +407,10 @@ impl ShellProcess {
     fn exit(&mut self, _args: &[&str]) -> Result<()> {
         self.has_requested_exit = true;
         Ok(())
+    }
+
+    fn crash(&mut self, args: &[&str]) -> Result<()> {
+        panic!("Intentional crash: {:?}", args);
     }
 
     fn stdoutln(&mut self, s: impl Display) -> Result<()> {

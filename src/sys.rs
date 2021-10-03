@@ -223,7 +223,8 @@ impl Process {
         }
     }
 
-    fn kill_signal(&mut self) {
+    // TODO: feels iffy that this is public. Used from devfs
+    pub fn kill_signal(&mut self) {
         self.incoming_kill_signals.push_front(());
     }
 }
@@ -293,6 +294,10 @@ impl ProcessHandle {
         let active_handle = ActiveProcessHandle::new(self);
         let mut processes = active_handle.process_table();
         processes.current().args.clone()
+    }
+
+    pub fn pid(&self) -> Pid {
+        self.pid
     }
 
     pub fn handle_signals(self) -> Option<Self> {
@@ -632,11 +637,6 @@ impl ProcessHandle {
 
             proc.find_open_file(fd)?
         };
-
-        eprintln!(
-            "In sc_write: found open file, fd {} as open_file_id {:?}",
-            fd, open_file_id
-        );
 
         // unlock process table before calling VFS
         let num_written = active_context.sys.vfs.write_file(open_file_id, buf)?;

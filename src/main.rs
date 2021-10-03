@@ -3,12 +3,17 @@ mod procfs;
 mod programs;
 mod regularfs;
 mod sys;
+mod terminal_driver;
 mod util;
 mod vfs;
 
-use std::io;
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::Poll;
 use std::time::Duration;
+
+use futures::{join, poll, FutureExt};
 
 use crate::devfs::DevFilesystem;
 use crate::programs::background;
@@ -17,12 +22,11 @@ use crate::programs::file;
 use crate::programs::file_helpers::FileReader;
 use crate::programs::shell::ShellProcess;
 use crate::programs::utils;
-
 use crate::sys::{
     OpenFlags, ProcessHandle, SpawnAction, SpawnFds, SpawnUid, System, WaitPidOptions,
     WaitPidTarget, GLOBAL_PROCESS_TABLE,
 };
-use crate::util::{FilePermissions, FileType, Pid, Uid};
+use crate::util::{FilePermissions, FileType, InodeIdentifier, Pid, Uid};
 use crate::vfs::VirtualFilesystemSwitch;
 
 type Result<T> = std::result::Result<T, String>;
@@ -35,57 +39,127 @@ pub async fn main() {
 
     eprintln!("--------------------------------");
 
-    let init_pid = Pid(0);
     let mut vfs = VirtualFilesystemSwitch::new();
     let root_inode_id = vfs.root_inode_id();
-    let devfs = DevFilesystem::new(root_inode_id);
-    let terminal_input = devfs.kernel_terminal_input_writer();
+    let terminal_in = Arc::new(Mutex::new(Default::default()));
+    let terminal_out = Arc::new(Mutex::new(Default::default()));
+    let devfs = DevFilesystem::new(
+        root_inode_id,
+        Arc::clone(&terminal_in),
+        Arc::clone(&terminal_out),
+    );
+    let terminal_in = devfs.terminal_input_feeder();
     vfs.mount_filesystem("dev".to_owned(), devfs);
-    tokio::task::spawn_blocking(move || run_terminal_handler(terminal_input));
-
-    let sys = System::new(vfs);
-    let sys = Arc::new(Mutex::new(sys));
-
-    let liveness = Arc::new(());
-    {
-        let processes = GLOBAL_PROCESS_TABLE.lock().unwrap();
-        let init_handle = System::spawn_process(
-            processes,
-            sys,
-            vec!["init".to_owned()],
-            init_pid,
-            Uid(0),
-            (None, None),
-            root_inode_id,
-        );
-        let liveness = Arc::clone(&liveness);
-        tokio::task::spawn_blocking(move || run_init_proc(init_handle, liveness))
+    let should_thread_exit = Arc::new(AtomicBool::new(false));
+    let terminal_driver_fut = {
+        let should_exit = Arc::clone(&should_thread_exit);
+        tokio::task::spawn_blocking(move || {
+            terminal_driver::run(should_exit, terminal_in, terminal_out)
+        })
     };
 
+    let sys = System::new(vfs);
+    let init_handle = spawn_init_proc(sys, root_inode_id);
+    let init_pid = init_handle.pid();
+    let init_fut = tokio::task::spawn_blocking(move || run_init_proc(init_handle));
+
+    // fuse needed for select
+    let terminal_driver_fut = terminal_driver_fut.fuse();
+    let init_fut = init_fut.fuse();
+
+    let mut futs = vec![
+        (ThreadId::Pid(init_pid), init_fut),
+        (ThreadId::TerminalDriver, terminal_driver_fut),
+    ];
+
     loop {
+        let mut finished_threads = HashSet::new();
+        let mut should_shut_down = false;
+        for (thread_id, f) in futs.iter_mut() {
+            match poll!(f) {
+                Poll::Pending => {}
+                Poll::Ready(result) => {
+                    eprintln!("{:?} RESULT: {:?}", thread_id, result);
+                    match result {
+                        Ok(_) => {}
+                        Err(join_error) => {
+                            if let Ok(reason) = join_error.try_into_panic() {
+                                println!("A thread crashed: {:?} ({:?}) - Will shut down operating system.", thread_id, reason);
+                                should_shut_down = true;
+                            }
+                        }
+                    }
+                    match thread_id {
+                        ThreadId::TerminalDriver => {
+                            println!("TERMINAL DRIVER EXITED");
+                            should_shut_down = true;
+                        }
+                        ThreadId::Pid(pid) => {
+                            if *pid == init_pid {
+                                eprintln!("Init process exited.");
+                                should_shut_down = true;
+                            }
+                        }
+                    }
+                    finished_threads.insert(*thread_id);
+                }
+            }
+        }
+        futs.retain(|(pid, _)| !finished_threads.contains(pid));
+        if should_shut_down {
+            break;
+        }
+
         std::thread::sleep(Duration::from_millis(20));
+
         {
             let mut spawn_queue = sys::GLOBAL_PROCESS_SPAWN_QUEUE.lock().unwrap();
             if let Some(new_handle) = spawn_queue.pop_back() {
-                tokio::task::spawn_blocking(move || run_new_proc(new_handle));
+                let pid = new_handle.pid();
+                let f = tokio::task::spawn_blocking(move || run_program_proc(new_handle));
+                futs.push((ThreadId::Pid(pid), f.fuse()));
             }
         }
     }
-}
 
-fn run_terminal_handler(terminal_input_writer: Arc<Mutex<Vec<u8>>>) {
-    let stdin = io::stdin();
-    loop {
-        let mut input = String::new();
-        stdin.read_line(&mut input).unwrap();
-        terminal_input_writer
-            .lock()
-            .unwrap()
-            .extend(input.as_bytes());
+    eprintln!("Exited loop in main method");
+    should_thread_exit.store(true, Ordering::Relaxed);
+
+    for (id, f) in futs {
+        if id == ThreadId::TerminalDriver {
+            eprintln!("Waiting for terminal driver to exit...");
+            join!(f).0.unwrap();
+        }
     }
+
+    println!();
+    eprintln!("Operating system shutting down.");
+    std::process::exit(0);
 }
 
-fn run_init_proc(mut handle: ProcessHandle, liveness_checker: Arc<()>) {
+#[derive(Debug, Hash, PartialEq, Eq, Copy, Clone)]
+enum ThreadId {
+    Pid(Pid),
+    TerminalDriver,
+}
+
+fn spawn_init_proc(sys: System, root_inode_id: InodeIdentifier) -> ProcessHandle {
+    let sys = Arc::new(Mutex::new(sys));
+
+    let init_pid = Pid(0);
+    let processes = GLOBAL_PROCESS_TABLE.lock().unwrap();
+    System::spawn_process(
+        processes,
+        sys,
+        vec!["init".to_owned()],
+        init_pid,
+        Uid(0),
+        (None, None),
+        root_inode_id,
+    )
+}
+
+fn run_init_proc(mut handle: ProcessHandle) {
     // Make init's stdin/stdout point at /dev/null. It must be the first file we open
     handle
         .sc_open("/dev/null", OpenFlags::empty(), None)
@@ -94,17 +168,8 @@ fn run_init_proc(mut handle: ProcessHandle, liveness_checker: Arc<()>) {
         .sc_open("/dev/null", OpenFlags::empty(), None)
         .expect("/dev/null must exist for stdout");
 
-    handle
-        .sc_create("/bin", FileType::Directory, FilePermissions::new(7, 5))
-        .unwrap();
+    setup_bin_directory(&mut handle);
 
-    create_program_file(&mut handle, "/bin/script", "script").unwrap();
-    create_program_file(&mut handle, "/bin/sleep", "sleep").unwrap();
-    create_program_file(&mut handle, "/bin/background", "background").unwrap();
-    create_program_file(&mut handle, "/bin/shell", "shell").unwrap();
-    create_program_file(&mut handle, "/bin/file", "file").unwrap();
-    create_program_file(&mut handle, "/bin/touch", "touch").unwrap();
-    create_program_file(&mut handle, "/bin/dump", "dump").unwrap();
     let log_fd = handle
         .sc_open("/dev/log", OpenFlags::empty(), None)
         .unwrap();
@@ -112,15 +177,14 @@ fn run_init_proc(mut handle: ProcessHandle, liveness_checker: Arc<()>) {
     let terminal_fd = handle
         .sc_open("/dev/terminal", OpenFlags::empty(), None)
         .expect("/dev/terminal must exist to be used as shell stdin");
-    let shell_uid = Uid(1);
-    handle
+    let shell = handle
         .sc_spawn(
             vec!["/bin/shell".to_owned()],
             SpawnFds::Set(terminal_fd, terminal_fd),
-            SpawnUid::Uid(shell_uid),
+            SpawnUid::Uid(Uid(1)),
             Some(SpawnAction::ClaimTerminal(terminal_fd)),
         )
-        .expect("spawn shell from init");
+        .unwrap();
     handle.sc_close(terminal_fd).unwrap();
     handle
         .sc_spawn(
@@ -129,7 +193,7 @@ fn run_init_proc(mut handle: ProcessHandle, liveness_checker: Arc<()>) {
             SpawnUid::Inherit,
             None,
         )
-        .expect("spawn background proc from init");
+        .unwrap();
 
     handle
         .sc_write(log_fd, "Init starting...\n".as_bytes())
@@ -143,7 +207,7 @@ fn run_init_proc(mut handle: ProcessHandle, liveness_checker: Arc<()>) {
             }
         };
 
-        handle
+        let script = handle
             .sc_spawn(
                 vec!["/bin/script".to_owned()],
                 SpawnFds::Inherit,
@@ -151,14 +215,24 @@ fn run_init_proc(mut handle: ProcessHandle, liveness_checker: Arc<()>) {
                 None,
             )
             .expect("spawn child from init");
-        let child_result = handle
-            .sc_wait_pid(WaitPidTarget::AnyChild, WaitPidOptions::Default)
+        let script_result = handle
+            .sc_wait_pid(WaitPidTarget::Pid(script), WaitPidOptions::Default)
             .unwrap();
         handle
-            .sc_write(log_fd, format!("{:?}\n", child_result).as_bytes())
+            .sc_write(log_fd, format!("{:?}\n", script_result).as_bytes())
             .unwrap();
 
-        let sleep_pid = handle
+        while let Some(child_result) = handle
+            .sc_wait_pid(WaitPidTarget::AnyChild, WaitPidOptions::NoHang)
+            .unwrap()
+        {
+            if child_result.0 == shell {
+                eprintln!("Main shell has exited. Init exiting.");
+                return;
+            }
+        }
+
+        let sleep = handle
             .sc_spawn(
                 vec!["/bin/sleep".to_owned()],
                 SpawnFds::Inherit,
@@ -167,14 +241,22 @@ fn run_init_proc(mut handle: ProcessHandle, liveness_checker: Arc<()>) {
             )
             .expect("spawn sleep from init");
         handle
-            .sc_wait_pid(WaitPidTarget::Pid(sleep_pid), WaitPidOptions::Default)
+            .sc_wait_pid(WaitPidTarget::Pid(sleep), WaitPidOptions::Default)
             .unwrap();
-
-        if Arc::strong_count(&liveness_checker) < 2 {
-            break;
-        }
     }
-    println!("Init process exiting.");
+}
+
+fn setup_bin_directory(handle: &mut ProcessHandle) {
+    handle
+        .sc_create("/bin", FileType::Directory, FilePermissions::new(7, 5))
+        .unwrap();
+    create_program_file(handle, "/bin/script", "script").unwrap();
+    create_program_file(handle, "/bin/sleep", "sleep").unwrap();
+    create_program_file(handle, "/bin/background", "background").unwrap();
+    create_program_file(handle, "/bin/shell", "shell").unwrap();
+    create_program_file(handle, "/bin/file", "file").unwrap();
+    create_program_file(handle, "/bin/touch", "touch").unwrap();
+    create_program_file(handle, "/bin/dump", "dump").unwrap();
 }
 
 fn create_program_file(handle: &mut ProcessHandle, path: &str, program_name: &str) -> Result<()> {
@@ -189,7 +271,7 @@ fn create_program_file(handle: &mut ProcessHandle, path: &str, program_name: &st
     handle.sc_close(fd)
 }
 
-fn run_new_proc(handle: ProcessHandle) {
+fn run_program_proc(handle: ProcessHandle) {
     let args = handle.clone_args();
     let name = &args[0];
 
@@ -236,7 +318,7 @@ fn run_sleep_proc(mut handle: ProcessHandle) {
             return;
         };
 
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(Duration::from_millis(100));
     }
 
     handle
@@ -255,6 +337,5 @@ fn run_script_proc(mut handle: ProcessHandle) {
         };
         std::thread::sleep(Duration::from_secs(1));
     }
-
     handle.sc_exit(0);
 }
