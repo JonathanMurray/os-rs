@@ -41,13 +41,8 @@ pub async fn main() {
 
     let mut vfs = VirtualFilesystemSwitch::new();
     let root_inode_id = vfs.root_inode_id();
-    let terminal_in = Arc::new(Mutex::new(Default::default()));
     let terminal_out = Arc::new(Mutex::new(Default::default()));
-    let devfs = DevFilesystem::new(
-        root_inode_id,
-        Arc::clone(&terminal_in),
-        Arc::clone(&terminal_out),
-    );
+    let devfs = DevFilesystem::new(root_inode_id, Arc::clone(&terminal_out));
     let terminal_in = devfs.terminal_input_feeder();
     vfs.mount_filesystem("dev".to_owned(), devfs);
     let should_thread_exit = Arc::new(AtomicBool::new(false));
@@ -140,6 +135,8 @@ pub async fn main() {
     should_thread_exit.store(true, Ordering::Relaxed);
 
     for (id, f) in futs {
+        // Wait for terminal driver to exit, so that we don't
+        // exit the program with a messed up terminal state
         if id == ThreadId::TerminalDriver {
             eprintln!("Waiting for terminal driver to exit...");
             join!(f).0.unwrap();

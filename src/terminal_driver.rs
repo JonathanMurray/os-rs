@@ -59,8 +59,19 @@ impl TerminalDriver {
 
         eprintln!("Terminal driver exiting.");
 
+        let line_number = termion::terminal_size().unwrap().1;
+        // note: cursor positions are 1-indexed
+        write!(
+            stdout,
+            "{}",
+            cursor::Goto(self.line.pos() as u16 + 1, line_number),
+        )
+        .unwrap();
+
         // Reset terminal from raw mode.
         drop(stdout);
+
+        println!("Shutdown triggered by the terminal driver.");
         std::process::exit(0);
     }
 
@@ -74,8 +85,16 @@ impl TerminalDriver {
             let key = key_result.unwrap();
             match key {
                 Key::Ctrl('c') => {
-                    self.to_kernel.interrupt();
+                    self.to_kernel.trigger_interrupt();
                     write!(stdout, "^C").unwrap();
+                }
+
+                Key::Ctrl('d') => {
+                    write!(stdout, "^D").unwrap();
+                    if self.line.input().is_empty() {
+                        // This effectively signals EOF to the foreground process
+                        self.to_kernel.feed_bytes(vec![]);
+                    }
                 }
 
                 Key::Ctrl('q') => {
@@ -136,7 +155,7 @@ impl TerminalDriver {
                     let finished_line = self.line.new_line();
                     // Need to insert \r before line break as stdout is raw
                     write!(stdout, "\r\n").unwrap();
-                    self.to_kernel.bytes(finished_line.as_bytes());
+                    self.to_kernel.feed_bytes(finished_line.into_bytes());
                 }
 
                 Key::Char(ch) => {
@@ -168,16 +187,16 @@ impl TerminalDriver {
         let mut lines = str_output.lines();
         if let Some(line) = lines.next() {
             write!(stdout, "{}", line).unwrap();
-            self.line.set(line.to_owned());
+            self.line.set_from_output(line.to_owned());
         }
         for line in lines {
             // Need to insert \r\n manually before any further lines, as stdout is raw
             write!(stdout, "\r\n{}", line).unwrap();
-            self.line.set(line.to_owned());
+            self.line.set_from_output(line.to_owned());
         }
         if ends_with_newline {
             write!(stdout, "\r\n").unwrap();
-            self.line.clear();
+            self.line.reset();
         }
         stdout.lock().flush().unwrap();
         output.clear();
@@ -202,7 +221,7 @@ struct CurrentLine {
     s: String,
     pos: usize,
     // If the line starts with a shell prompt, we're not allowed to edit that
-    min_allowed_pos: usize,
+    input_start_pos: usize,
 }
 
 impl CurrentLine {
@@ -210,7 +229,7 @@ impl CurrentLine {
         Self {
             s: Default::default(),
             pos: 0,
-            min_allowed_pos: 0,
+            input_start_pos: 0,
         }
     }
 
@@ -223,7 +242,7 @@ impl CurrentLine {
     }
 
     fn backspace(&mut self) -> bool {
-        if self.pos > self.min_allowed_pos {
+        if self.pos > self.input_start_pos {
             self.s.remove(self.pos - 1);
             self.pos -= 1;
             true
@@ -233,7 +252,7 @@ impl CurrentLine {
     }
 
     fn start(&mut self) {
-        self.pos = self.min_allowed_pos;
+        self.pos = self.input_start_pos;
     }
 
     fn end(&mut self) {
@@ -241,7 +260,7 @@ impl CurrentLine {
     }
 
     fn left(&mut self) -> bool {
-        if self.pos > self.min_allowed_pos {
+        if self.pos > self.input_start_pos {
             self.pos -= 1;
             true
         } else {
@@ -265,21 +284,29 @@ impl CurrentLine {
 
     fn new_line(&mut self) -> String {
         self.s.push('\n');
+        self.take_input()
+    }
+
+    fn take_input(&mut self) -> String {
         let line = std::mem::take(&mut self.s);
-        let input = &line[self.min_allowed_pos..];
-        self.clear();
+        let input = &line[self.input_start_pos..];
+        self.reset();
         input.to_string()
     }
 
-    fn clear(&mut self) {
-        self.s.clear();
-        self.min_allowed_pos = 0;
-        self.pos = self.min_allowed_pos;
+    fn input(&self) -> &str {
+        &self.s[self.input_start_pos..]
     }
 
-    fn set(&mut self, s: String) {
-        self.s = s;
-        self.min_allowed_pos = self.s.len();
-        self.pos = self.min_allowed_pos;
+    fn reset(&mut self) {
+        self.s.clear();
+        self.input_start_pos = 0;
+        self.pos = self.input_start_pos;
+    }
+
+    fn set_from_output(&mut self, output: String) {
+        self.s = output;
+        self.input_start_pos = self.s.len();
+        self.pos = self.input_start_pos;
     }
 }

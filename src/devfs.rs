@@ -5,6 +5,7 @@ use crate::util::{
 };
 use crate::vfs::Filesystem;
 
+use std::collections::VecDeque;
 use std::io::{Cursor, Read};
 use std::sync::{Arc, Mutex};
 
@@ -17,7 +18,7 @@ pub struct DevFilesystem {
     log_inode: Inode,
     null_inode: Inode,
     terminal_inode: Inode,
-    terminal_input: Arc<Mutex<Vec<u8>>>,
+    terminal_input_chunks: Arc<Mutex<VecDeque<Vec<u8>>>>,
     terminal_output: Arc<Mutex<Vec<u8>>>,
     terminal_foreground_pid: Arc<Mutex<Option<Pid>>>,
 }
@@ -27,11 +28,7 @@ pub struct DevFilesystem {
 //encapsulate the behaviour of a specific device?
 
 impl DevFilesystem {
-    pub fn new(
-        parent_inode_id: InodeIdentifier,
-        terminal_input: Arc<Mutex<Vec<u8>>>,
-        terminal_output: Arc<Mutex<Vec<u8>>>,
-    ) -> Self {
+    pub fn new(parent_inode_id: InodeIdentifier, terminal_output: Arc<Mutex<Vec<u8>>>) -> Self {
         let user_id = Uid(0);
         let root_inode = Inode {
             id: InodeIdentifier {
@@ -84,7 +81,7 @@ impl DevFilesystem {
             log_inode,
             null_inode,
             terminal_inode,
-            terminal_input,
+            terminal_input_chunks: Default::default(),
             terminal_output,
             terminal_foreground_pid: Arc::new(Mutex::new(None)),
         }
@@ -92,30 +89,27 @@ impl DevFilesystem {
 
     pub fn terminal_input_feeder(&self) -> TerminalInputFeeder {
         TerminalInputFeeder {
-            buf: Arc::clone(&self.terminal_input),
+            chunks: Arc::clone(&self.terminal_input_chunks),
             foreground_pid: Arc::clone(&self.terminal_foreground_pid),
         }
     }
 }
 
 pub struct TerminalInputFeeder {
-    buf: Arc<Mutex<Vec<u8>>>,
+    chunks: Arc<Mutex<VecDeque<Vec<u8>>>>,
     foreground_pid: Arc<Mutex<Option<Pid>>>,
 }
 impl TerminalInputFeeder {
-    pub fn bytes(&mut self, buf: &[u8]) {
-        self.buf.lock().unwrap().extend(buf);
+    pub fn feed_bytes(&mut self, buf: Vec<u8>) {
+        eprintln!("Got chunk from terminal driver: {:?}", buf);
+        self.chunks.lock().unwrap().push_back(buf);
     }
 
-    pub fn interrupt(&mut self) {
+    pub fn trigger_interrupt(&mut self) {
         eprintln!("DEBUG: devfs received interrupt");
-
         let mut processes = GLOBAL_PROCESS_TABLE.lock().unwrap();
-
         let pid = *self.foreground_pid.lock().unwrap();
-
         let pid = pid.expect("There should be a foreground process by now");
-
         processes.process(pid).unwrap().signal(Signal::Interrupt);
     }
 }
@@ -232,24 +226,32 @@ impl Filesystem for DevFilesystem {
             3 => {
                 let mut processes = GLOBAL_PROCESS_TABLE.lock().unwrap();
 
-                let pid = *self.terminal_foreground_pid.lock().unwrap();
-                if pid.as_ref() == Some(&processes.current().pid) {
-                    let mut terminal_input = self.terminal_input.lock().unwrap();
-                    let mut cursor = Cursor::new(&terminal_input[..]);
-                    let n = cursor
-                        .read(buf)
-                        .map_err(|e| format!("Failed to read: {}", e))?;
-                    terminal_input.drain(0..n);
-                    if n > 0 {
-                        eprintln!("DEBUG: devfs read terminal input: '{:?}'", &buf[..n]);
-                        Ok(Some(n))
-                    } else {
-                        //TODO: should we use async processes instead and return a Future
-                        //here that triggers / wakes up when the kernel puts more data
-                        // on stdin?
+                let foreground_pid = *self.terminal_foreground_pid.lock().unwrap();
+                if foreground_pid.as_ref() == Some(&processes.current().pid) {
+                    let mut terminal_input = self.terminal_input_chunks.lock().unwrap();
+                    match terminal_input.front_mut() {
+                        Some(input_chunk) => {
+                            let mut cursor = Cursor::new(&input_chunk[..]);
+                            let n = cursor
+                                .read(buf)
+                                .map_err(|e| format!("Failed to read: {}", e))?;
+                            input_chunk.drain(0..n);
+                            if input_chunk.is_empty() {
+                                // We read the entire chunk, so remove it from the queue
+                                terminal_input.pop_front();
+                            }
+                            eprintln!("DEBUG: devfs read terminal input: '{:?}'", &buf[..n]);
+                            Ok(Some(n))
+                        }
+                        None => {
+                            //TODO: should we use async processes instead and return a Future
+                            //here that triggers / wakes up when the kernel puts more data
+                            // on stdin?
 
-                        //Indicates that we'd need to block to receive data
-                        Ok(None)
+                            //Indicates that we'd need to block to receive data
+
+                            Ok(None)
+                        }
                     }
                 } else {
                     // The reader is not the terminal's foreground process.

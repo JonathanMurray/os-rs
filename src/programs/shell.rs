@@ -77,6 +77,11 @@ impl ShellProcess {
                 };
             };
 
+            if n == 0 {
+                //EOF
+                break;
+            }
+
             // Try to build up lines from the data we received
             let mut left = 0;
             for right in 0..n {
