@@ -2,8 +2,8 @@ use crate::procfs::ProcFilesystem;
 use crate::regularfs::RegularFilesystem;
 use crate::sys::{IoctlRequest, OpenFlags};
 use crate::util::{
-    DirectoryEntry, FilePermissions, FileStat, FileType, FilesystemId, Ino, Inode, InodeIdentifier,
-    OpenFileId,
+    DirectoryEntry, Ecode, FilePermissions, FileStat, FileType, FilesystemId, Ino, Inode,
+    InodeIdentifier, OpenFileId, SysResult,
 };
 use std::collections::{hash_map::Entry, HashMap};
 use std::sync::{Arc, Weak};
@@ -13,38 +13,37 @@ type Result<T> = core::result::Result<T, String>;
 pub trait Filesystem: std::fmt::Debug + Send {
     fn root_inode_id(&self) -> InodeIdentifier;
 
-    fn ioctl(&mut self, inode_number: Ino, req: IoctlRequest) -> Result<()>;
+    fn ioctl(&mut self, inode_number: Ino, req: IoctlRequest) -> SysResult<()>;
 
     fn create(
         &mut self,
         parent_directory: InodeIdentifier,
         file_type: FileType,
         permissions: FilePermissions,
-    ) -> Result<Ino>;
+    ) -> SysResult<Ino>;
 
-    fn truncate(&mut self, inode_number: Ino) -> Result<()>;
+    fn truncate(&mut self, inode_number: Ino) -> SysResult<()>;
 
-    fn remove(&mut self, inode_number: Ino) -> Result<()>;
+    fn remove(&mut self, inode_number: Ino) -> SysResult<()>;
 
-    fn inode(&self, inode_number: Ino) -> Result<Inode>;
+    fn inode(&self, inode_number: Ino) -> Option<Inode>;
 
     fn add_directory_entry(
         &mut self,
         directory: Ino,
         name: String,
         child: InodeIdentifier,
-    ) -> Result<()>;
+    ) -> SysResult<()>;
 
-    fn remove_directory_entry(&mut self, directory: Ino, child: InodeIdentifier) -> Result<()>;
+    fn remove_directory_entry(&mut self, directory: Ino, child: InodeIdentifier) -> SysResult<()>;
 
-    fn directory_entries(&mut self, directory: Ino) -> Result<Vec<DirectoryEntry>>;
+    fn directory_entries(&mut self, directory: Ino) -> SysResult<Vec<DirectoryEntry>>;
 
-    fn update_inode_parent(&mut self, inode_number: Ino, new_parent: InodeIdentifier)
-        -> Result<()>;
+    fn update_inode_parent(&mut self, inode_number: Ino, new_parent: InodeIdentifier) -> bool;
 
-    fn open(&mut self, inode_number: Ino, id: OpenFileId) -> Result<()>;
+    fn open(&mut self, inode_number: Ino, id: OpenFileId) -> SysResult<()>;
 
-    fn close(&mut self, id: OpenFileId) -> Result<()>;
+    fn close(&mut self, id: OpenFileId) -> SysResult<()>;
 
     fn read(
         &mut self,
@@ -52,9 +51,9 @@ pub trait Filesystem: std::fmt::Debug + Send {
         id: OpenFileId,
         buf: &mut [u8],
         file_offset: usize,
-    ) -> Result<Option<usize>>;
+    ) -> SysResult<Option<usize>>;
 
-    fn write(&mut self, inode_number: Ino, buf: &[u8], file_offset: usize) -> Result<usize>;
+    fn write(&mut self, inode_number: Ino, buf: &[u8], file_offset: usize) -> SysResult<usize>;
 }
 
 /// aka file description (POSIX) or file handle
@@ -117,14 +116,14 @@ impl VirtualFilesystemSwitch {
         file_type: FileType,
         permissions: FilePermissions,
         cwd: InodeIdentifier,
-    ) -> Result<()> {
+    ) -> SysResult<()> {
         let path = path.into();
         let parts: Vec<&str> = path.split('/').collect();
         let parent_inode = self.resolve_from_parts(&parts[..parts.len() - 1], cwd)?;
         let parent_id = parent_inode.id;
 
         if !parent_inode.is_dir() {
-            return Err("Parent is not a directory".to_owned());
+            return Err(Ecode::Enotdir);
         }
 
         let name = parts[parts.len() - 1].to_owned();
@@ -135,7 +134,7 @@ impl VirtualFilesystemSwitch {
             .iter()
             .any(|x| x.name == name)
         {
-            return Err("File already exists".to_owned());
+            return Err(Ecode::Eexist);
         }
 
         self._create_file(parent_id, file_type, permissions, name)
@@ -147,7 +146,7 @@ impl VirtualFilesystemSwitch {
         file_type: FileType,
         permissions: FilePermissions,
         name: String,
-    ) -> Result<()> {
+    ) -> SysResult<()> {
         let filesystem_id = parent_inode_id.filesystem_id;
 
         let fs = self.fs.get_mut(&filesystem_id).unwrap();
@@ -163,13 +162,13 @@ impl VirtualFilesystemSwitch {
         Ok(())
     }
 
-    pub fn unlink_file(&mut self, path: &str, cwd: InodeIdentifier) -> Result<()> {
+    pub fn unlink_file(&mut self, path: &str, cwd: InodeIdentifier) -> SysResult<()> {
         let parts: Vec<&str> = path.split('/').collect();
         let inode = self.resolve_from_parts(&parts, cwd)?;
         let inode_id = inode.id;
 
         if inode.file_type == FileType::Directory {
-            return Err("Cannot remove directory".to_owned());
+            return Err(Ecode::Eisdir);
         }
         let parent_id = inode.parent_id;
 
@@ -184,7 +183,7 @@ impl VirtualFilesystemSwitch {
         old_path: &str,
         new_path: S,
         cwd: InodeIdentifier,
-    ) -> Result<()> {
+    ) -> SysResult<()> {
         //TODO: handle replacing existing file
         let new_path = new_path.into();
 
@@ -194,37 +193,44 @@ impl VirtualFilesystemSwitch {
         let old_parent_id = inode.parent_id;
 
         if inode.file_type == FileType::Directory {
-            return Err("Cannot move directory".to_owned());
+            //TODO Handle moving directory
+            return Err(Ecode::Custom("Cannot move directory (yet)".to_owned()));
         }
 
         let new_parts: Vec<&str> = new_path.split('/').collect();
         let new_base_name = new_parts[new_parts.len() - 1].to_owned();
         let new_parent_inode = self.resolve_from_parts(&new_parts[..new_parts.len() - 1], cwd)?;
         if new_parent_inode.id.filesystem_id != inode_id.filesystem_id {
-            // To support this we'd need to create a new inode and copy the file contents
-            return Err("Cannot move files between different filesystems".to_owned());
+            return Err(Ecode::Exdev);
         }
         let new_parent_id = new_parent_inode.id;
 
         if new_parent_inode.file_type != FileType::Directory {
-            return Err("New parent is not a directory".to_owned());
+            return Err(Ecode::Enotdir);
         }
 
-        let old_parent_inode = self.inode(old_parent_id)?;
+        let old_parent_inode = self
+            .inode(old_parent_id)
+            .ok_or_else(|| Ecode::Custom("Old parent doesn't exist".to_owned()))?;
+
+        //TODO This check can go away now?
         if old_parent_inode.id.filesystem_id == FilesystemId::Proc {
-            return Err("Cannot move file in procfs".to_owned());
+            return Err(Ecode::Custom("Cannot move file in procfs".to_owned()));
         }
         assert!(old_parent_inode.is_dir());
 
         //HACK: Assume everything is on same fs
         let fs = self.fs.get_mut(&old_parent_inode.id.filesystem_id).unwrap();
 
-        fs.update_inode_parent(inode_id.number, new_parent_id)?;
+        if !fs.update_inode_parent(inode_id.number, new_parent_id) {
+            panic!("We have checked that the inode exists");
+        }
         fs.remove_directory_entry(old_parent_id.number, inode_id)?;
-        fs.add_directory_entry(new_parent_id.number, new_base_name, inode_id)
+        fs.add_directory_entry(new_parent_id.number, new_base_name, inode_id)?;
+        Ok(())
     }
 
-    pub fn stat_file(&mut self, path: &str, cwd: InodeIdentifier) -> Result<FileStat> {
+    pub fn stat_file(&mut self, path: &str, cwd: InodeIdentifier) -> SysResult<FileStat> {
         //TODO make cwd optional
         let parts: Vec<&str> = path.split('/').collect();
         let inode = self.resolve_from_parts(&parts, cwd)?;
@@ -240,16 +246,16 @@ impl VirtualFilesystemSwitch {
         })
     }
 
-    pub fn list_dir(&mut self, open_file_id: OpenFileId) -> Result<Vec<DirectoryEntry>> {
+    pub fn list_dir(&mut self, open_file_id: OpenFileId) -> SysResult<Vec<DirectoryEntry>> {
         let inode_id = self
             .open_files
             .get(&open_file_id)
-            .ok_or("No such open file")?
+            .ok_or(Ecode::Ebadf)?
             .inode_id;
         self._list_dir(inode_id)
     }
 
-    fn _list_dir(&mut self, inode_id: InodeIdentifier) -> Result<Vec<DirectoryEntry>> {
+    fn _list_dir(&mut self, inode_id: InodeIdentifier) -> SysResult<Vec<DirectoryEntry>> {
         let fs = self.fs.get_mut(&inode_id.filesystem_id).unwrap();
         fs.directory_entries(inode_id.number)
     }
@@ -260,19 +266,19 @@ impl VirtualFilesystemSwitch {
         cwd: InodeIdentifier,
         flags: OpenFlags,
         creation_file_permissions: Option<FilePermissions>,
-    ) -> Result<Arc<OpenFileId>> {
+    ) -> SysResult<Arc<OpenFileId>> {
         let parts: Vec<&str> = path.split('/').collect();
         let inode = match self.resolve_from_parts(&parts, cwd) {
             Ok(inode) => inode,
             Err(_) if flags.contains(OpenFlags::CREATE) => {
                 //FUTURE: this is all very inefficient. We should take better care
                 //not to redo path resolves
-                let permissions =
-                    creation_file_permissions.expect("Need file permissions to create file");
+                let permissions = creation_file_permissions.expect("No file permissions specified");
                 self.create_file(path, FileType::Regular, permissions, cwd)?;
                 self.resolve_from_parts(&parts, cwd)
                     .expect("must exist now")
             }
+
             Err(e) => return Err(e),
         };
 
@@ -303,7 +309,7 @@ impl VirtualFilesystemSwitch {
         Ok(fd_reference)
     }
 
-    pub fn close_file(&mut self, id: Arc<OpenFileId>) -> Result<()> {
+    pub fn close_file(&mut self, id: Arc<OpenFileId>) -> SysResult<()> {
         let id = *id.as_ref(); // this releases the reference
         match self.open_files.entry(id) {
             Entry::Occupied(e) => {
@@ -317,17 +323,15 @@ impl VirtualFilesystemSwitch {
                     fs.close(id)
                 }
             }
-            Entry::Vacant(_) => Err("No such open file".to_owned()),
+            Entry::Vacant(_) => Err(Ecode::Ebadf),
         }
     }
 
-    fn get_open_file_mut(&mut self, id: OpenFileId) -> Result<&mut OpenFile> {
-        self.open_files
-            .get_mut(&id)
-            .ok_or(format!("No open file found for id: {:?}", id))
+    fn get_open_file_mut(&mut self, id: OpenFileId) -> SysResult<&mut OpenFile> {
+        self.open_files.get_mut(&id).ok_or(Ecode::Ebadf)
     }
 
-    pub fn ioctl(&mut self, open_file_id: OpenFileId, req: IoctlRequest) -> Result<()> {
+    pub fn ioctl(&mut self, open_file_id: OpenFileId, req: IoctlRequest) -> SysResult<()> {
         let inode_id = self.get_open_file_mut(open_file_id)?.inode_id;
         let inode_number = inode_id.number;
 
@@ -335,7 +339,11 @@ impl VirtualFilesystemSwitch {
         fs.ioctl(inode_number, req)
     }
 
-    pub fn read_file(&mut self, open_file_id: OpenFileId, buf: &mut [u8]) -> Result<Option<usize>> {
+    pub fn read_file(
+        &mut self,
+        open_file_id: OpenFileId,
+        buf: &mut [u8],
+    ) -> SysResult<Option<usize>> {
         let (inode_id, offset) = {
             let open_file = self.get_open_file_mut(open_file_id)?;
             (open_file.inode_id, open_file.offset)
@@ -353,7 +361,7 @@ impl VirtualFilesystemSwitch {
         Ok(Some(n_read))
     }
 
-    pub fn write_file(&mut self, open_file_id: OpenFileId, buf: &[u8]) -> Result<usize> {
+    pub fn write_file(&mut self, open_file_id: OpenFileId, buf: &[u8]) -> SysResult<usize> {
         let (inode_id, offset) = {
             let open_file = self.get_open_file_mut(open_file_id)?;
             (open_file.inode_id, open_file.offset)
@@ -367,14 +375,16 @@ impl VirtualFilesystemSwitch {
         Ok(n_read)
     }
 
-    pub fn seek(&mut self, open_file_id: OpenFileId, offset: usize) -> Result<()> {
+    pub fn seek(&mut self, open_file_id: OpenFileId, offset: usize) -> SysResult<()> {
         self.get_open_file_mut(open_file_id)?.offset = offset;
         Ok(())
     }
 
     pub fn path_from_inode(&mut self, inode_id: InodeIdentifier) -> Result<String> {
         let mut parts_reverse: Vec<String> = Vec::new();
-        let mut inode = self.inode(inode_id)?;
+        let mut inode = self
+            .inode(inode_id)
+            .ok_or_else(|| "Parent doesn't exist".to_owned())?;
 
         loop {
             if inode.parent_id == inode.id {
@@ -382,7 +392,9 @@ impl VirtualFilesystemSwitch {
                 break;
             }
 
-            let parent_inode = self.inode(inode.parent_id)?;
+            let parent_inode = self
+                .inode(inode.parent_id)
+                .ok_or_else(|| "Parent doesn't exist".to_owned())?;
             let fs = self.fs.get_mut(&inode.parent_id.filesystem_id).unwrap();
             let name = fs
                 .directory_entries(inode.parent_id.number)?
@@ -404,7 +416,7 @@ impl VirtualFilesystemSwitch {
         Ok(path)
     }
 
-    fn resolve_from_parts(&mut self, mut parts: &[&str], cwd: InodeIdentifier) -> Result<Inode> {
+    fn resolve_from_parts(&mut self, mut parts: &[&str], cwd: InodeIdentifier) -> SysResult<Inode> {
         //TODO Make cwd optional. Should be possible to call this with absolute paths w/o cwd
         let mut inode = match parts.get(0) {
             Some(&"") => {
@@ -417,8 +429,12 @@ impl VirtualFilesystemSwitch {
                 fs.inode(root_inode_number)
                     .expect("Must have root inode with number 0")
             }
-            None => self.inode(cwd)?,    // resolving a file in cwd
-            Some(_) => self.inode(cwd)?, // resolving something further down in the tree
+
+            // resolving a file in cwd
+            None => self.inode(cwd).ok_or(Ecode::Enoent)?,
+
+            // resolving something further down in the tree
+            Some(_) => self.inode(cwd).ok_or(Ecode::Enoent)?,
         };
 
         for part in parts {
@@ -441,28 +457,28 @@ impl VirtualFilesystemSwitch {
                         .directory_entries(inode_id.number)?
                         .into_iter()
                         .find(|entry| entry.name == **part)
-                        .ok_or_else(|| "no such inode".to_owned())?
+                        .ok_or(Ecode::Enoent)?
                         .inode_id
                 }
             };
 
-            inode = self.inode(next_id)?;
+            inode = self.inode(next_id).ok_or(Ecode::Enoent)?;
         }
 
         let inode_id = inode.id;
-        self.inode(inode_id)
+        self.inode(inode_id).ok_or(Ecode::Enoent)
     }
 
-    pub fn resolve_directory(&mut self, path: &str, cwd: InodeIdentifier) -> Result<Inode> {
+    pub fn resolve_directory(&mut self, path: &str, cwd: InodeIdentifier) -> SysResult<Inode> {
         let parts: Vec<&str> = path.split('/').collect();
         let inode = self.resolve_from_parts(&parts, cwd)?;
         if inode.file_type != FileType::Directory {
-            return Err(format!("Not a directory: {}", path));
+            return Err(Ecode::Custom(format!("Not a directory: {}", path)));
         }
         Ok(inode)
     }
 
-    fn inode(&self, inode_id: InodeIdentifier) -> Result<Inode> {
+    fn inode(&self, inode_id: InodeIdentifier) -> Option<Inode> {
         let fs = self.fs.get(&inode_id.filesystem_id).unwrap();
         fs.inode(inode_id.number)
     }

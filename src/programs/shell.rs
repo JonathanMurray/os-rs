@@ -3,7 +3,7 @@ use crate::sys::{
     IoctlRequest, OpenFlags, ProcessHandle, ProcessResult, Signal, SignalHandler, SpawnAction,
     SpawnFds, SpawnUid, WaitPidOptions, WaitPidTarget,
 };
-use crate::util::{FilePermissions, FileStat, FileType, Pid};
+use crate::util::{Fd, FilePermissions, FileStat, FileType, Pid};
 
 use std::collections::HashSet;
 use std::fmt::Display;
@@ -115,9 +115,7 @@ impl ShellProcess {
     }
 
     fn print_prompt(handle: &ProcessHandle) {
-        let current_dir_name = handle
-            .sc_get_current_dir_name()
-            .expect("Must have valid cwd");
+        let current_dir_name = handle.get_current_dir_name().expect("Must have valid cwd");
         handle
             .stdout(&format!("{}$ ", current_dir_name.as_str()))
             .expect("Write to stdout");
@@ -178,7 +176,8 @@ impl ShellProcess {
                 self.execute_command(tokens, run_in_background)?;
 
                 self.handle.sc_dup2(saved_stdout_fd, 1)?; // restore stdout
-                self.handle.sc_close(saved_stdout_fd)
+                self.handle.sc_close(saved_stdout_fd)?;
+                Ok(())
             }
             None => self.execute_command(tokens, run_in_background),
         }
@@ -209,7 +208,7 @@ impl ShellProcess {
 
     fn stat(&mut self, args: &[&str]) -> Result<()> {
         let path = args.get(1).ok_or("missing arg")?;
-        let stat = self.handle.sc_stat(path)?;
+        let stat = self.handle.sc_stat(path).map_err(|e| format!("{}", e))?;
         let output = self._stat_line(stat);
         self.stdoutln(output)?;
         Ok(())
@@ -238,14 +237,24 @@ impl ShellProcess {
 
     fn cat(&mut self, args: &[&str]) -> Result<()> {
         let path = args.get(1).ok_or_else(|| "missing arg".to_owned())?;
-        self._cat_file(path)
+        self.cat_file(path)
     }
 
-    fn _cat_file(&mut self, path: &str) -> Result<()> {
+    fn cat_file(&mut self, path: &str) -> Result<()> {
         let fd = self.handle.sc_open(path, OpenFlags::empty(), None)?;
+        let result = self.cat_fd(fd);
+        self.handle.sc_close(fd).expect("Closing cat file");
+        result
+    }
+
+    fn cat_fd(&mut self, fd: Fd) -> Result<()> {
         let count = 256;
         loop {
-            match self.handle.sc_sendfile(1, fd, count)? {
+            match self
+                .handle
+                .sc_sendfile(1, fd, count)
+                .map_err(|e| format!("{}", e))?
+            {
                 Some(0) => break, //EOF
                 None => {
                     self.stdoutln("Error: Reading would block!")?;
@@ -259,7 +268,7 @@ impl ShellProcess {
 
     fn ls(&mut self, args: &[&str]) -> Result<()> {
         let path: &str = args.get(1).unwrap_or(&".");
-        let stat = self.handle.sc_stat(path)?;
+        let stat = self.handle.sc_stat(path).map_err(|e| format!("{}", e))?;
         if stat.file_type == FileType::Regular {
             self.stdoutln(path)?;
         } else {
@@ -274,7 +283,7 @@ impl ShellProcess {
 
     fn ll(&mut self, args: &[&str]) -> Result<()> {
         let path: &str = args.get(1).unwrap_or(&".");
-        let stat = self.handle.sc_stat(path)?;
+        let stat = self.handle.sc_stat(path).map_err(|e| format!("{}", e))?;
         if stat.file_type == FileType::Regular {
             let output = format!("{}{:>10}", self._stat_line(stat), path);
             self.stdoutln(output)?;
@@ -285,7 +294,10 @@ impl ShellProcess {
             for dir_entry in dir_entries {
                 let child_name = dir_entry.name;
                 let child_path = format!("{}/{}", path, child_name);
-                let stat = self.handle.sc_stat(&child_path)?;
+                let stat = self
+                    .handle
+                    .sc_stat(&child_path)
+                    .map_err(|e| format!("{}", e))?;
                 let output = format!("{:<44}{}", self._stat_line(stat), child_name);
 
                 self.stdoutln(output)?;
@@ -306,9 +318,9 @@ impl ShellProcess {
     /// builtin
     fn cd(&mut self, args: &[&str]) -> Result<()> {
         if let Some(&path) = args.get(1) {
-            self.handle.sc_chdir(path)
+            self.handle.sc_chdir(path).map_err(|e| format!("{}", e))
         } else {
-            self.handle.sc_chdir("/")
+            self.handle.sc_chdir("/").map_err(|e| format!("{}", e))
         }
     }
 
@@ -330,14 +342,15 @@ impl ShellProcess {
     }
 
     fn help(&mut self, _args: &[&str]) -> Result<()> {
-        self._cat_file("/README")
+        self.cat_file("/README")
     }
 
     fn kill(&mut self, args: &[&str]) -> Result<()> {
         let pid = args.get(1).ok_or_else(|| "missing arg".to_owned())?;
-        let pid = u32::from_str(*pid).map_err(|_| "Not a valid pid".to_owned())?;
+        let pid = u32::from_str(*pid).map_err(|_| "Invalid non-integer process ID".to_owned())?;
         let pid = Pid(pid);
-        self.handle.sc_kill(pid, Signal::Kill)
+        self.handle.sc_kill(pid, Signal::Kill)?;
+        Ok(())
     }
 
     fn dynamic_program(&mut self, args: &[&str], run_in_background: bool) -> Result<()> {
@@ -385,7 +398,9 @@ impl ShellProcess {
 
     fn ps(&mut self, _args: &[&str]) -> Result<()> {
         let mut f = FileReader::open(&self.handle, "/proc/status")?;
-        let content = f.read_to_string()?;
+        let content = f
+            .read_to_string()
+            .map_err(|e| format!("Failed to read proc file: {}", e))?;
         let mut lines = content.lines();
         f.close();
 
@@ -447,6 +462,7 @@ impl ShellProcess {
 
     fn stdoutln(&mut self, s: impl Display) -> Result<()> {
         let output = format!("{}\n", s);
-        self.handle.stdout(output)
+        self.handle.stdout(output)?;
+        Ok(())
     }
 }

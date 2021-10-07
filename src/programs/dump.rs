@@ -1,7 +1,6 @@
 use crate::programs::file_helpers::FileReader;
 use crate::sys::ProcessHandle;
 
-type Result<T> = std::result::Result<T, String>;
 
 pub fn run_dump_proc(mut handle: ProcessHandle, args: Vec<String>) {
     match _run_dump_proc(&mut handle, args) {
@@ -15,7 +14,7 @@ pub fn run_dump_proc(mut handle: ProcessHandle, args: Vec<String>) {
     }
 }
 
-pub fn _run_dump_proc(handle: &mut ProcessHandle, args: Vec<String>) -> Result<()> {
+pub fn _run_dump_proc(handle: &mut ProcessHandle, args: Vec<String>) -> Result<(), String> {
     let path = args.get(1).ok_or_else(|| "Missing path arg".to_owned())?;
     let mut reader =
         FileReader::open(handle, path).map_err(|e| format!("Failed to open {}: {}", path, e))?;

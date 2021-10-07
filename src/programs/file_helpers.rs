@@ -1,7 +1,6 @@
-type Result<T> = std::result::Result<T, String>;
 
 use crate::sys::{OpenFlags, ProcessHandle};
-use crate::util::{Fd, FileStat};
+use crate::util::{Ecode, Fd, FileStat, SysResult};
 
 pub struct FileReader<'a> {
     path: &'a str,
@@ -10,7 +9,7 @@ pub struct FileReader<'a> {
 }
 
 impl<'a> FileReader<'a> {
-    pub fn open(handle: &'a ProcessHandle, path: &'a str) -> Result<Self> {
+    pub fn open(handle: &'a ProcessHandle, path: &'a str) -> SysResult<Self> {
         let fd = handle.sc_open(path, OpenFlags::empty(), None)?;
         Ok(Self {
             path,
@@ -19,15 +18,15 @@ impl<'a> FileReader<'a> {
         })
     }
 
-    pub fn stat(&mut self) -> Result<FileStat> {
+    pub fn stat(&mut self) -> SysResult<FileStat> {
         self.handle.sc_stat(self.path)
     }
 
-    pub fn read(&mut self, buf: &mut [u8]) -> Result<Option<usize>> {
+    pub fn read(&mut self, buf: &mut [u8]) -> SysResult<Option<usize>> {
         self.handle.sc_read(self.fd.unwrap(), buf)
     }
 
-    pub fn read_fully(&mut self) -> Result<Vec<u8>> {
+    pub fn read_fully(&mut self) -> SysResult<Vec<u8>> {
         let mut vec = Vec::new();
         let mut buf = [0; 1024];
         loop {
@@ -37,14 +36,14 @@ impl<'a> FileReader<'a> {
                     vec.extend(&buf[..n]);
                 }
                 Ok(None) => {
-                    return Err("Would need to block to read".to_owned());
+                    return Err(Ecode::Custom("Would need to block to read".to_owned()));
                 }
-                Err(e) => return Err(format!("Failed to read string: {}", e)),
+                Err(e) => return Err(e),
             }
         }
     }
 
-    pub fn read_to_string(&mut self) -> Result<String> {
+    pub fn read_to_string(&mut self) -> SysResult<String> {
         self.read_fully()
             .map(|content| String::from_utf8_lossy(&content).to_string())
     }

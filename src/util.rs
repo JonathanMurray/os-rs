@@ -115,3 +115,64 @@ impl InodeIdentifier {
         }
     }
 }
+
+#[derive(Debug)]
+pub enum Ecode {
+    /// Interrupted
+    Eintr,
+
+    /// Is directory
+    Eisdir,
+
+    /// Not a directory
+    Enotdir,
+
+    /// No such file or directory
+    Enoent,
+
+    /// Inappropriate I/O control operation
+    Enotty,
+
+    /// Bad file descriptor
+    Ebadf,
+
+    /// File exists
+    Eexist,
+
+    /// No such process
+    Esrch,
+
+    /// Operation not permitted
+    Eperm,
+
+    /// Improper link
+    Exdev,
+
+    Custom(String),
+}
+
+impl std::fmt::Display for Ecode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
+        match self {
+            Ecode::Eintr => write!(f, "Interrupted"),
+            Ecode::Eisdir => write!(f, "Is a directory"),
+            Ecode::Enotdir => write!(f, "Not a directory"),
+            Ecode::Enoent => write!(f, "No such file or directory"),
+            Ecode::Enotty => write!(f, "Inappropriate I/O control operation"),
+            Ecode::Ebadf => write!(f, "Bad file descriptor"),
+            Ecode::Eexist => write!(f, "File exists"),
+            Ecode::Esrch => write!(f, "No such process"),
+            Ecode::Eperm => write!(f, "Operation not permitted"),
+            Ecode::Exdev => write!(f, "Improper link"),
+            Ecode::Custom(s) => write!(f, "{}", s),
+        }
+    }
+}
+
+impl From<Ecode> for String {
+    fn from(ecode: Ecode) -> Self {
+        format!("{}", ecode)
+    }
+}
+
+pub type SysResult<T> = core::result::Result<T, Ecode>;

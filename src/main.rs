@@ -23,13 +23,11 @@ use crate::programs::file_helpers::FileReader;
 use crate::programs::shell::ShellProcess;
 use crate::programs::utils;
 use crate::sys::{
-    Ecode, OpenFlags, ProcessHandle, ProcessResult, ProcessWasKilledPanic, SpawnAction, SpawnFds,
+    OpenFlags, ProcessHandle, ProcessResult, ProcessWasKilledPanic, SpawnAction, SpawnFds,
     SpawnUid, System, WaitPidOptions, WaitPidTarget, GLOBAL_PROCESS_TABLE,
 };
-use crate::util::{FilePermissions, FileType, InodeIdentifier, Pid, Uid};
+use crate::util::{Ecode, FilePermissions, FileType, InodeIdentifier, Pid, SysResult, Uid};
 use crate::vfs::VirtualFilesystemSwitch;
-
-type Result<T> = std::result::Result<T, String>;
 
 const PROGRAM_MAGIC_CODE: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF];
 
@@ -279,7 +277,11 @@ fn setup_bin_directory(handle: &mut ProcessHandle) {
     create_program_file(handle, "/bin/dump", "dump").unwrap();
 }
 
-fn create_program_file(handle: &mut ProcessHandle, path: &str, program_name: &str) -> Result<()> {
+fn create_program_file(
+    handle: &mut ProcessHandle,
+    path: &str,
+    program_name: &str,
+) -> SysResult<()> {
     let fd = handle.sc_open(path, OpenFlags::CREATE, Some(FilePermissions::new(7, 5)))?;
     //TODO we leak the FD if write fails
     let mut content = Vec::new();
@@ -287,7 +289,7 @@ fn create_program_file(handle: &mut ProcessHandle, path: &str, program_name: &st
     content.extend(program_name.as_bytes());
     content.extend("\n".as_bytes());
     let n_written = handle.sc_write(fd, &content[..])?;
-    assert_eq!(n_written, content.len(), "We didn't writ the whole file");
+    assert_eq!(n_written, content.len(), "We didn't write the whole file");
     handle.sc_close(fd)
 }
 

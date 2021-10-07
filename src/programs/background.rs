@@ -1,9 +1,7 @@
 use crate::sys::{OpenFlags, ProcessHandle};
-use crate::util::FilePermissions;
+use crate::util::{FilePermissions, SysResult};
 
 use std::time::Duration;
-
-type Result<T> = core::result::Result<T, String>;
 
 pub fn run_background_proc(mut sys: ProcessHandle) {
     let readme = "Commands:\nstat\ncat\nls\nll\ntouch\nmkdir\ncd\nrm\nmv\nhelp\n";
@@ -35,7 +33,7 @@ pub fn run_background_proc(mut sys: ProcessHandle) {
     sys.sc_close(fd).expect("Close uptime file");
 }
 
-fn create_text_file(handle: &mut ProcessHandle, path: &str, content: &str) -> Result<()> {
+fn create_text_file(handle: &mut ProcessHandle, path: &str, content: &str) -> SysResult<()> {
     let fd = handle.sc_open(path, OpenFlags::CREATE, Some(FilePermissions::new(7, 4)))?;
     //TODO we leak the FD if write fails
     let content = content.as_bytes();

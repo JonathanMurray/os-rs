@@ -5,12 +5,10 @@ use std::time::Instant;
 
 use crate::sys::{GlobalProcessTable, IoctlRequest, GLOBAL_PROCESS_TABLE};
 use crate::util::{
-    DirectoryEntry, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier,
-    OpenFileId, Pid, Uid,
+    DirectoryEntry, Ecode, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier,
+    OpenFileId, Pid, SysResult, Uid,
 };
 use crate::vfs::Filesystem;
-
-type Result<T> = core::result::Result<T, String>;
 
 fn lock_global_process_table() -> MutexGuard<'static, GlobalProcessTable> {
     // LOCKING: VFS must never be accessed while holding this lock
@@ -39,7 +37,7 @@ impl ProcFilesystem {
         }
     }
 
-    pub fn open_file(&mut self, inode_number: Ino, open_file_id: OpenFileId) -> Result<()> {
+    pub fn open_file(&mut self, inode_number: Ino, open_file_id: OpenFileId) -> SysResult<()> {
         match inode_number {
             1 => {
                 let mut content = String::new();
@@ -87,29 +85,26 @@ impl ProcFilesystem {
                         self.open_files.insert(open_file_id, File::Regular(content));
                         return Ok(());
                     } else {
-                        println!("DEBUG: No process with pid: {:?}", pid);
+                        eprintln!("WARN: No process with pid: {:?}", pid);
                     }
                 }
 
-                return Err(format!(
-                    "Cannot open. No file on procfs with inode number: {}",
-                    inode_number
-                ));
+                Err(Ecode::Enoent)
             }
         }
     }
 
-    pub fn close_file(&mut self, open_file_id: OpenFileId) -> Result<()> {
+    pub fn close_file(&mut self, open_file_id: OpenFileId) -> SysResult<()> {
         if self.open_files.remove(&open_file_id).is_none() {
-            return Err(format!("No open file with id: {:?}", open_file_id));
+            return Err(Ecode::Ebadf);
         }
 
         Ok(())
     }
 
-    pub fn inode(&self, inode_number: Ino) -> Result<Inode> {
+    pub fn inode(&self, inode_number: Ino) -> Option<Inode> {
         match inode_number {
-            0 => Ok(Inode {
+            0 => Some(Inode {
                 parent_id: self.parent_inode_id,
                 id: InodeIdentifier {
                     filesystem_id: FilesystemId::Proc,
@@ -120,7 +115,7 @@ impl ProcFilesystem {
                 permissions: FilePermissions::new(7, 5),
                 user_id: Uid(0),
             }),
-            1 => Ok(Inode {
+            1 => Some(Inode {
                 parent_id: InodeIdentifier {
                     filesystem_id: FilesystemId::Proc,
                     number: 0,
@@ -140,7 +135,7 @@ impl ProcFilesystem {
                     let pid = Pid(inode_number - 1000);
 
                     if process_table_lock.process(pid).is_some() {
-                        return Ok(Inode {
+                        return Some(Inode {
                             parent_id: InodeIdentifier {
                                 filesystem_id: FilesystemId::Proc,
                                 number: 0,
@@ -157,15 +152,12 @@ impl ProcFilesystem {
                     }
                 }
 
-                return Err(format!(
-                    "No file on procfs with inode number: {}",
-                    inode_number
-                ));
+                None
             }
         }
     }
 
-    pub fn list_directory(&mut self, inode_number: Ino) -> Result<Vec<DirectoryEntry>> {
+    pub fn list_directory(&mut self, inode_number: Ino) -> SysResult<Vec<DirectoryEntry>> {
         match inode_number {
             0 => {
                 let mut listing = vec![DirectoryEntry {
@@ -184,10 +176,7 @@ impl ProcFilesystem {
                 listing.extend(pid_files);
                 Ok(listing)
             }
-            _ => Err(format!(
-                "No directory on procfs with inode number: {}",
-                inode_number
-            )),
+            _ => Err(Ecode::Enoent),
         }
     }
 
@@ -196,18 +185,20 @@ impl ProcFilesystem {
         open_file_id: OpenFileId,
         buf: &mut [u8],
         file_offset: usize,
-    ) -> Result<Option<usize>> {
-        let file = self
-            .open_files
-            .get(&open_file_id)
-            .ok_or_else(|| format!("No open file on procfs with id: {:?}", open_file_id))?;
+    ) -> SysResult<Option<usize>> {
+        let file = self.open_files.get(&open_file_id).ok_or_else(|| {
+            Ecode::Custom(format!(
+                "No open file on procfs with id: {:?}",
+                open_file_id
+            ))
+        })?;
         if let File::Regular(content) = file {
             let mut cursor = Cursor::new(&content);
             cursor.set_position(file_offset as u64);
             let num_read = cursor.read(buf).expect("Failed to read from file");
             Ok(Some(num_read))
         } else {
-            Err("Cannot read directory".to_owned())
+            Err(Ecode::Eisdir)
         }
     }
 }
@@ -220,8 +211,8 @@ impl Filesystem for ProcFilesystem {
         }
     }
 
-    fn ioctl(&mut self, _inode_number: Ino, _req: IoctlRequest) -> Result<()> {
-        Err("ioctl not supported by procfs".to_owned())
+    fn ioctl(&mut self, _inode_number: Ino, _req: IoctlRequest) -> SysResult<()> {
+        Err(Ecode::Enotty)
     }
 
     fn create(
@@ -229,19 +220,19 @@ impl Filesystem for ProcFilesystem {
         _parent_directory: InodeIdentifier,
         _file_type: FileType,
         _permissions: FilePermissions,
-    ) -> Result<Ino> {
-        Err("Can't create file on procfs".to_owned())
+    ) -> SysResult<Ino> {
+        Err(Ecode::Custom("Can't create file on procfs".to_owned()))
     }
 
-    fn truncate(&mut self, _inode_number: Ino) -> Result<()> {
-        Err("Can't truncate file on procfs".to_owned())
+    fn truncate(&mut self, _inode_number: Ino) -> SysResult<()> {
+        Err(Ecode::Custom("Can't truncate file on procfs".to_owned()))
     }
 
-    fn remove(&mut self, _inode_number: Ino) -> Result<()> {
-        Err("Can't remove file on procfs".to_owned())
+    fn remove(&mut self, _inode_number: Ino) -> SysResult<()> {
+        Err(Ecode::Custom("Can't remove file on procfs".to_owned()))
     }
 
-    fn inode(&self, inode_number: Ino) -> Result<Inode> {
+    fn inode(&self, inode_number: Ino) -> Option<Inode> {
         self.inode(inode_number)
     }
 
@@ -250,32 +241,36 @@ impl Filesystem for ProcFilesystem {
         _directory: Ino,
         _name: String,
         _child: InodeIdentifier,
-    ) -> Result<()> {
-        Err("Can't add directory entry on procfs".to_owned())
+    ) -> SysResult<()> {
+        Err(Ecode::Custom(
+            "Can't add directory entry on procfs".to_owned(),
+        ))
     }
 
-    fn remove_directory_entry(&mut self, _directory: Ino, _child: InodeIdentifier) -> Result<()> {
-        Err("Can't remove directory entry on procfs".to_owned())
+    fn remove_directory_entry(
+        &mut self,
+        _directory: Ino,
+        _child: InodeIdentifier,
+    ) -> SysResult<()> {
+        Err(Ecode::Custom(
+            "Can't remove directory entry on procfs".to_owned(),
+        ))
     }
 
-    fn directory_entries(&mut self, directory: Ino) -> Result<Vec<DirectoryEntry>> {
+    fn directory_entries(&mut self, directory: Ino) -> SysResult<Vec<DirectoryEntry>> {
         self.list_directory(directory)
     }
 
-    fn update_inode_parent(
-        &mut self,
-        _inode_number: Ino,
-        _new_parent: InodeIdentifier,
-    ) -> Result<()> {
+    fn update_inode_parent(&mut self, _inode_number: Ino, _new_parent: InodeIdentifier) -> bool {
         panic!("We shouldn't get here? procfs update_inode_parent")
     }
 
-    fn open(&mut self, inode_number: Ino, open_file_id: OpenFileId) -> Result<()> {
+    fn open(&mut self, inode_number: Ino, open_file_id: OpenFileId) -> SysResult<()> {
         eprintln!("procfs open({}, {:?})", inode_number, open_file_id);
         self.open_file(inode_number, open_file_id)
     }
 
-    fn close(&mut self, id: OpenFileId) -> Result<()> {
+    fn close(&mut self, id: OpenFileId) -> SysResult<()> {
         eprintln!("procfs close({:?})", id);
         self.close_file(id)
     }
@@ -286,11 +281,11 @@ impl Filesystem for ProcFilesystem {
         id: OpenFileId,
         buf: &mut [u8],
         file_offset: usize,
-    ) -> Result<Option<usize>> {
+    ) -> SysResult<Option<usize>> {
         self.read_file_at_offset(id, buf, file_offset)
     }
 
-    fn write(&mut self, _inode_number: Ino, _buf: &[u8], _file_offset: usize) -> Result<usize> {
-        Err("Can't write to procfs".to_owned())
+    fn write(&mut self, _inode_number: Ino, _buf: &[u8], _file_offset: usize) -> SysResult<usize> {
+        Err(Ecode::Custom("Can't write to procfs".to_owned()))
     }
 }
