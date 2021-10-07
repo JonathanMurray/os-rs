@@ -23,8 +23,8 @@ use crate::programs::file_helpers::FileReader;
 use crate::programs::shell::ShellProcess;
 use crate::programs::utils;
 use crate::sys::{
-    OpenFlags, ProcessHandle, ProcessWasKilledPanic, SpawnAction, SpawnFds, SpawnUid, System,
-    WaitPidOptions, WaitPidTarget, GLOBAL_PROCESS_TABLE,
+    Ecode, OpenFlags, ProcessHandle, ProcessResult, ProcessWasKilledPanic, SpawnAction, SpawnFds,
+    SpawnUid, System, WaitPidOptions, WaitPidTarget, GLOBAL_PROCESS_TABLE,
 };
 use crate::util::{FilePermissions, FileType, InodeIdentifier, Pid, Uid};
 use crate::vfs::VirtualFilesystemSwitch;
@@ -205,9 +205,6 @@ fn run_init_proc(mut handle: ProcessHandle) {
         )
         .unwrap();
 
-    // TODO Install a signal handler for SIGCHLD:
-    // if pid of child == shell, then we exit
-
     handle
         .sc_write(log_fd, "Init starting...\n".as_bytes())
         .unwrap();
@@ -221,22 +218,29 @@ fn run_init_proc(mut handle: ProcessHandle) {
                 None,
             )
             .expect("spawn child from init");
-        let script_result = handle
-            .sc_wait_pid(WaitPidTarget::Pid(script), WaitPidOptions::Default)
-            .unwrap();
+
+        let script_result = loop {
+            let child_result = wait_for_child(&handle, WaitPidTarget::AnyChild)
+                .expect("Waiting for child")
+                .expect("Should not return None as we are willing to block");
+
+            eprintln!("Init waited and got child result: {:?}", child_result);
+
+            let pid = child_result.0;
+            if pid == shell {
+                eprintln!("Main shell exited. Init will exit.");
+                handle.sc_exit(0);
+                return;
+            }
+
+            if pid == script {
+                break child_result;
+            }
+        };
+
         handle
             .sc_write(log_fd, format!("{:?}\n", script_result).as_bytes())
             .unwrap();
-
-        while let Some(child_result) = handle
-            .sc_wait_pid(WaitPidTarget::AnyChild, WaitPidOptions::NoHang)
-            .unwrap()
-        {
-            if child_result.0 == shell {
-                eprintln!("Main shell has exited. Init exiting.");
-                return;
-            }
-        }
 
         let sleep = handle
             .sc_spawn(
@@ -247,9 +251,19 @@ fn run_init_proc(mut handle: ProcessHandle) {
             )
             .expect("spawn sleep from init");
         eprintln!("Init::waitpid...");
-        handle
-            .sc_wait_pid(WaitPidTarget::Pid(sleep), WaitPidOptions::Default)
-            .unwrap();
+        wait_for_child(&handle, WaitPidTarget::Pid(sleep)).unwrap();
+    }
+}
+
+fn wait_for_child(
+    handle: &ProcessHandle,
+    target: WaitPidTarget,
+) -> std::result::Result<Option<(Pid, ProcessResult)>, Ecode> {
+    loop {
+        match handle.sc_wait_pid(target, WaitPidOptions::Default) {
+            Err(Ecode::Eintr) => continue,
+            other_result => return other_result,
+        }
     }
 }
 

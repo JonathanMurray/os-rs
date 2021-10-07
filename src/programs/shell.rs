@@ -364,7 +364,8 @@ impl ShellProcess {
 
             let result = self
                 .handle
-                .sc_wait_pid(WaitPidTarget::Pid(child_pid), WaitPidOptions::Default)?;
+                .sc_wait_pid(WaitPidTarget::Pid(child_pid), WaitPidOptions::Default)
+                .map_err(|e| format!("{:?}", e))?;
             match result.unwrap() {
                 (_, ProcessResult::ExitCode(0)) => {}
                 (child_pid, bad_result) => {

@@ -13,6 +13,16 @@ use std::time::Duration;
 
 type Result<T> = core::result::Result<T, String>;
 
+#[derive(Debug)]
+pub enum Ecode {
+    ///Interrupted
+    Eintr,
+
+    Custom(String),
+}
+
+type SysResult<T> = core::result::Result<T, Ecode>;
+
 pub struct ProcessWasKilledPanic;
 
 // NOTE: Take care when using this!
@@ -55,7 +65,7 @@ impl GlobalProcessTable {
         pid
     }
 
-    fn remove(&mut self, pid: Pid) {
+    fn reap(&mut self, pid: Pid) {
         self.processes
             .remove(&pid)
             .expect("Cannot remove process. Unrecognized pid");
@@ -95,6 +105,7 @@ pub enum ProcessResult {
 pub enum Signal {
     Kill,
     Interrupt,
+    ChildTerminated,
 }
 
 pub trait SignalHandler: Send + std::fmt::Debug {
@@ -204,7 +215,7 @@ impl Process {
         std::mem::take(&mut self.fds)
     }
 
-    fn ensure_zombified(&mut self, result: ProcessResult) {
+    fn ensure_zombie(&mut self, result: ProcessResult) {
         // Don't override existing result if process is already a zombie
         self.result.get_or_insert(result);
         self.state = ProcessState::Zombie;
@@ -220,7 +231,7 @@ impl Process {
         );
         assert!(self.state != ProcessState::Zombie);
         eprintln!("{:?}: Setting result to {:?}", self.pid, result);
-        self.ensure_zombified(result);
+        self.ensure_zombie(result);
     }
 
     // TODO: feels iffy that this is public. Used from devfs
@@ -296,7 +307,6 @@ impl ProcessHandle {
         self.pid
     }
 
-    // TODO
     pub fn sc_sigaction(&self, signal: Signal, handler: Box<dyn SignalHandler>) {
         let _active_handle = ActiveProcessHandle::new(self);
         self.signal_handlers.lock().unwrap().insert(signal, handler);
@@ -311,9 +321,8 @@ impl ProcessHandle {
         self._handle_signals(active_handle);
     }
 
-    fn _handle_signals(&self, mut active_handle: ActiveProcessHandle) {
+    fn _handle_signals(&self, mut active_handle: ActiveProcessHandle) -> bool {
         let mut processes = active_handle.process_table();
-        let pid = self.pid;
         let process = processes.current();
         if let Some(signal) = process.pending_signals.pop_back() {
             if let Some(handler) = self.signal_handlers.lock().unwrap().get(&signal) {
@@ -325,17 +334,29 @@ impl ProcessHandle {
                 match signal {
                     Signal::Kill | Signal::Interrupt => {
                         process.zombify(ProcessResult::Killed(signal));
+
+                        let fds = process.take_fds().into_values();
+
+                        let parent_pid = process.parent_pid;
+                        let parent = processes.process(parent_pid).expect("Parent must exist");
+                        parent.signal(Signal::ChildTerminated);
+
                         //Release process lock before using VFS
                         drop(processes);
-                        active_handle.close_zombies_fds(pid);
+                        active_handle.sys.close_files(fds);
                         drop(active_handle);
                         // Drop before panic, so we don't poison locks
                         eprintln!("Panicking due to process killed in handle_signals");
                         std::panic::panic_any(ProcessWasKilledPanic);
                     }
+                    Signal::ChildTerminated => {
+                        // Default action is to ignore
+                    }
                 }
             }
+            return true;
         }
+        false
     }
 
     pub fn stdout(&self, s: impl Display) -> Result<()> {
@@ -424,26 +445,28 @@ impl ProcessHandle {
     }
 
     pub fn sc_exit(self, code: u32) {
-        let self_pid = self.pid;
         let mut active_handle = ActiveProcessHandle::new(&self);
-
         let mut processes = active_handle.process_table();
-
         let proc = processes.current();
         proc.log.push(format!("exit({})", code));
         proc.zombify(ProcessResult::ExitCode(code));
 
+        let fds = proc.take_fds().into_values();
+
+        let parent_pid = proc.parent_pid;
+        let parent = processes.process(parent_pid).expect("Parent must exist");
+        parent.signal(Signal::ChildTerminated);
+
         // Release process lock before using VFS
         drop(processes);
-
-        active_handle.close_zombies_fds(self_pid);
+        active_handle.sys.close_files(fds);
     }
 
     pub fn sc_wait_pid(
         &self,
         target: WaitPidTarget,
         options: WaitPidOptions,
-    ) -> Result<Option<(Pid, ProcessResult)>> {
+    ) -> SysResult<Option<(Pid, ProcessResult)>> {
         let self_pid = self.pid;
         {
             let active_context = ActiveProcessHandle::new(self);
@@ -466,24 +489,19 @@ impl ProcessHandle {
                     child.result.take().map(|result| (pid, result))
                 }
                 WaitPidTarget::AnyChild => {
-                    let mut children = processes.children_mut(self_pid);
-                    loop {
-                        match children.next() {
-                            Some(child) => {
-                                if let Some(result) = child.result.take() {
-                                    eprintln!("{:?} will reap {:?}", self_pid, child.pid);
-                                    break Some((child.pid, result));
-                                }
-                            }
-                            None => {
-                                break None;
-                            }
+                    let mut found = None;
+                    for child in processes.children_mut(self_pid) {
+                        if let Some(result) = child.result.take() {
+                            found = Some((child.pid, result));
+                            break;
                         }
                     }
+                    found
                 }
             };
             if let Some((child_pid, child_result)) = child_and_result {
-                processes.remove(child_pid);
+                eprintln!("{:?} will reap {:?}", self_pid, child_pid);
+                processes.reap(child_pid);
                 processes.current().state = ProcessState::Running;
                 return Ok(Some((child_pid, child_result)));
             } else if options == WaitPidOptions::NoHang {
@@ -492,7 +510,10 @@ impl ProcessHandle {
             }
             drop(processes);
 
-            self._handle_signals(active_context);
+            if self._handle_signals(active_context) {
+                // Receiving a signal interrupts the syscall
+                return Err(Ecode::Eintr);
+            }
         }
     }
 
@@ -795,6 +816,8 @@ impl ProcessHandle {
 }
 
 impl Drop for ProcessHandle {
+    /// Clean up any remaining resources. This may effectively be a no-op
+    /// depending on how the process exited.
     fn drop(&mut self) {
         let pid = self.pid;
         let mut sys = self.shared_sys.lock().unwrap();
@@ -806,7 +829,7 @@ impl Drop for ProcessHandle {
         eprintln!("{:?} got processes in ProcessHandle::drop", pid);
 
         if let Some(p) = processes.process(pid) {
-            p.ensure_zombified(ProcessResult::ExitCode(0));
+            p.ensure_zombie(ProcessResult::ExitCode(0));
             let fds = p.take_fds();
             eprintln!("Dropping process {:?}. Will close fds: {:?}", pid, fds);
             // Release process lock before using VFS
@@ -818,7 +841,7 @@ impl Drop for ProcessHandle {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 pub enum WaitPidTarget {
     Pid(Pid),
     AnyChild,
@@ -892,16 +915,6 @@ impl<'a> ActiveProcessHandle<'a> {
     fn process_table(&self) -> MutexGuard<'_, GlobalProcessTable> {
         // LOCKING: System is locked - we own a MutexGuard
         GLOBAL_PROCESS_TABLE.lock().unwrap()
-    }
-
-    fn close_zombies_fds(&mut self, pid: Pid) {
-        let mut processes = self.process_table();
-        let process = processes.process(pid).unwrap();
-        let fds = process.take_fds();
-        //Release lock before using VFS
-        drop(processes);
-        eprintln!("Closing zombie fds: {:?}", fds);
-        self.sys.close_files(fds.into_values());
     }
 }
 
