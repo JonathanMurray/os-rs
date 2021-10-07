@@ -17,8 +17,7 @@ type Result<T> = core::result::Result<T, String>;
 pub enum Ecode {
     ///Interrupted
     Eintr,
-
-    Custom(String),
+    //Custom(String),
 }
 
 type SysResult<T> = core::result::Result<T, Ecode>;

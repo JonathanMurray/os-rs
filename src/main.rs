@@ -42,8 +42,7 @@ pub async fn main() {
     let mut vfs = VirtualFilesystemSwitch::new();
     let root_inode_id = vfs.root_inode_id();
     let terminal_out = Arc::new(Mutex::new(Default::default()));
-    let devfs = DevFilesystem::new(root_inode_id, Arc::clone(&terminal_out));
-    let terminal_in = devfs.terminal_input_feeder();
+    let (devfs, terminal_in) = DevFilesystem::new(root_inode_id, Arc::clone(&terminal_out));
     vfs.mount_filesystem("dev".to_owned(), devfs);
     let should_thread_exit = Arc::new(AtomicBool::new(false));
     let terminal_driver_fut = {
