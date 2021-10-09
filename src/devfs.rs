@@ -1,7 +1,7 @@
 use crate::sys::{IoctlRequest, Signal, GLOBAL_PROCESS_TABLE};
 use crate::util::{
-    DirectoryEntry, Ecode, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier,
-    OpenFileId, Pid, SysResult, Uid,
+    DirectoryEntry, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier,
+    OpenFileId, Pid, Uid,
 };
 use crate::vfs::Filesystem;
 
@@ -121,12 +121,14 @@ impl TerminalInputFeeder {
     }
 }
 
+type Result<T> = std::result::Result<T, String>;
+
 impl Filesystem for DevFilesystem {
     fn root_inode_id(&self) -> InodeIdentifier {
         self.root_inode.id
     }
 
-    fn ioctl(&mut self, inode_number: Ino, req: IoctlRequest) -> SysResult<()> {
+    fn ioctl(&mut self, inode_number: Ino, req: IoctlRequest) -> Result<()> {
         let could_handle = self
             .devices
             .get(&inode_number)
@@ -136,7 +138,7 @@ impl Filesystem for DevFilesystem {
         if could_handle {
             Ok(())
         } else {
-            Err(Ecode::Enotty)
+            Err("Does not support ioctl".to_owned())
         }
     }
 
@@ -145,16 +147,16 @@ impl Filesystem for DevFilesystem {
         _parent_directory: InodeIdentifier,
         _file_type: FileType,
         _permissions: FilePermissions,
-    ) -> SysResult<Ino> {
-        Err(Ecode::Custom("Can't create file on devfs".to_owned()))
+    ) -> Result<Ino> {
+        Err("Can't create file on devfs".to_owned())
     }
 
-    fn truncate(&mut self, _inode_number: Ino) -> SysResult<()> {
-        Err(Ecode::Custom("Can't truncate file on devfs".to_owned()))
+    fn truncate(&mut self, _inode_number: Ino) -> Result<()> {
+        Err("Can't truncate file on devfs".to_owned())
     }
 
-    fn remove(&mut self, _inode_number: Ino) -> SysResult<()> {
-        Err(Ecode::Custom("Can't remove file on devfs".to_owned()))
+    fn remove(&mut self, _inode_number: Ino) -> Result<()> {
+        Err("Can't remove file on devfs".to_owned())
     }
 
     fn inode(&self, inode_number: Ino) -> Option<Inode> {
@@ -172,23 +174,15 @@ impl Filesystem for DevFilesystem {
         _directory: Ino,
         _name: String,
         _child: InodeIdentifier,
-    ) -> SysResult<()> {
-        Err(Ecode::Custom(
-            "Can't add directory entry on devfs".to_owned(),
-        ))
+    ) -> Result<()> {
+        Err("Can't add directory entry on devfs".to_owned())
     }
 
-    fn remove_directory_entry(
-        &mut self,
-        _directory: Ino,
-        _child: InodeIdentifier,
-    ) -> SysResult<()> {
-        Err(Ecode::Custom(
-            "Can't remove directory entry on devfs".to_owned(),
-        ))
+    fn remove_directory_entry(&mut self, _directory: Ino, _child: InodeIdentifier) -> Result<()> {
+        Err("Can't remove directory entry on devfs".to_owned())
     }
 
-    fn directory_entries(&mut self, directory: Ino) -> SysResult<Vec<DirectoryEntry>> {
+    fn directory_entries(&mut self, directory: Ino) -> Result<Vec<DirectoryEntry>> {
         if directory == INO_ROOT {
             Ok(vec![
                 DirectoryEntry {
@@ -214,9 +208,9 @@ impl Filesystem for DevFilesystem {
                 },
             ])
         } else if self.devices.contains_key(&directory) {
-            Err(Ecode::Enotdir)
+            Err("not dir".to_owned())
         } else {
-            Err(Ecode::Enoent)
+            Err("no such inode".to_owned())
         }
     }
 
@@ -224,14 +218,13 @@ impl Filesystem for DevFilesystem {
         panic!("We shouldn't get here? devfs update_inode_parent")
     }
 
-    fn open(&mut self, inode_number: Ino, id: OpenFileId) -> SysResult<()> {
+    fn open(&mut self, inode_number: Ino, id: OpenFileId) -> Result<()> {
         eprintln!("devfs open({}, {:?})", inode_number, id);
         Ok(())
     }
 
-    fn close(&mut self, id: OpenFileId) -> SysResult<()> {
+    fn close(&mut self, id: OpenFileId) {
         eprintln!("devfs close({:?})", id);
-        Ok(())
     }
 
     fn read(
@@ -240,23 +233,23 @@ impl Filesystem for DevFilesystem {
         _id: OpenFileId,
         buf: &mut [u8],
         file_offset: usize,
-    ) -> SysResult<Option<usize>> {
+    ) -> Result<Option<usize>> {
         if inode_number == INO_ROOT {
-            Err(Ecode::Eisdir)
+            Err("dir".to_owned())
         } else if let Some((_inode, device)) = self.devices.get_mut(&inode_number) {
             device.read(buf, file_offset)
         } else {
-            Err(Ecode::Custom("No such file".to_owned()))
+            Err("No such file".to_owned())
         }
     }
 
-    fn write(&mut self, inode_number: Ino, buf: &[u8], file_offset: usize) -> SysResult<usize> {
+    fn write(&mut self, inode_number: Ino, buf: &[u8], file_offset: usize) -> Result<usize> {
         if inode_number == INO_ROOT {
-            Err(Ecode::Ebadf)
+            Err("dir".to_owned())
         } else if let Some((_inode, device)) = self.devices.get_mut(&inode_number) {
             device.write(buf, file_offset)
         } else {
-            Err(Ecode::Enoent)
+            Err("no such inode".to_owned())
         }
     }
 }
@@ -266,20 +259,20 @@ trait Device: Send + std::fmt::Debug {
         false
     }
 
-    fn read(&mut self, _buf: &mut [u8], _file_offset: usize) -> SysResult<Option<usize>>;
+    fn read(&mut self, _buf: &mut [u8], _file_offset: usize) -> Result<Option<usize>>;
 
-    fn write(&mut self, buf: &[u8], _file_offset: usize) -> SysResult<usize>;
+    fn write(&mut self, buf: &[u8], _file_offset: usize) -> Result<usize>;
 }
 
 #[derive(Debug)]
 struct LogDevice;
 
 impl Device for LogDevice {
-    fn read(&mut self, _buf: &mut [u8], _file_offset: usize) -> SysResult<Option<usize>> {
+    fn read(&mut self, _buf: &mut [u8], _file_offset: usize) -> Result<Option<usize>> {
         Ok(Some(0))
     }
 
-    fn write(&mut self, buf: &[u8], _file_offset: usize) -> SysResult<usize> {
+    fn write(&mut self, buf: &[u8], _file_offset: usize) -> Result<usize> {
         eprintln!("/dev/log: {}", String::from_utf8_lossy(buf));
         Ok(buf.len())
     }
@@ -289,11 +282,11 @@ impl Device for LogDevice {
 struct NullDevice;
 
 impl Device for NullDevice {
-    fn read(&mut self, _buf: &mut [u8], _file_offset: usize) -> SysResult<Option<usize>> {
+    fn read(&mut self, _buf: &mut [u8], _file_offset: usize) -> Result<Option<usize>> {
         Ok(Some(0))
     }
 
-    fn write(&mut self, buf: &[u8], _file_offset: usize) -> SysResult<usize> {
+    fn write(&mut self, buf: &[u8], _file_offset: usize) -> Result<usize> {
         eprintln!("DEBUG: /dev/null: {}", String::from_utf8_lossy(buf));
         Ok(buf.len())
     }
@@ -313,7 +306,7 @@ impl Device for TerminalDevice {
         true
     }
 
-    fn read(&mut self, buf: &mut [u8], _file_offset: usize) -> SysResult<Option<usize>> {
+    fn read(&mut self, buf: &mut [u8], _file_offset: usize) -> Result<Option<usize>> {
         let mut processes = GLOBAL_PROCESS_TABLE.lock().unwrap();
 
         let foreground_pid = *self.foreground_pid.lock().unwrap();
@@ -324,7 +317,7 @@ impl Device for TerminalDevice {
                     let mut cursor = Cursor::new(&input_chunk[..]);
                     let n = cursor
                         .read(buf)
-                        .map_err(|e| Ecode::Custom(format!("Failed to read: {}", e)))?;
+                        .map_err(|e| format!("Failed to read: {}", e))?;
                     input_chunk.drain(0..n);
                     if input_chunk.is_empty() {
                         // We read the entire chunk, so remove it from the queue
@@ -350,7 +343,7 @@ impl Device for TerminalDevice {
         }
     }
 
-    fn write(&mut self, buf: &[u8], _file_offset: usize) -> SysResult<usize> {
+    fn write(&mut self, buf: &[u8], _file_offset: usize) -> Result<usize> {
         eprintln!("DEBUG devfs terminal write: {:?}", buf);
         self.output.lock().unwrap().extend(buf);
         Ok(buf.len())

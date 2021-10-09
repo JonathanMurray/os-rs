@@ -118,6 +118,9 @@ impl InodeIdentifier {
 
 #[derive(Debug)]
 pub enum Ecode {
+    /// Permission denied
+    Eacces,
+
     /// Interrupted
     Eintr,
 
@@ -154,6 +157,7 @@ pub enum Ecode {
 impl std::fmt::Display for Ecode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
         match self {
+            Ecode::Eacces => write!(f, "Permission denied"),
             Ecode::Eintr => write!(f, "Interrupted"),
             Ecode::Eisdir => write!(f, "Is a directory"),
             Ecode::Enotdir => write!(f, "Not a directory"),

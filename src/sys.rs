@@ -107,11 +107,15 @@ pub struct Process {
     pub parent_pid: Pid,
     pub uid: Uid,
     pub args: Vec<String>,
+    // should this _actually_ be called "open_files" instead?
+    // the key is the Fd, and the value (on Linux) is actually
+    // a _pointer_ to an "open file" structure, not an ID (?)
     pub fds: HashMap<Fd, Arc<OpenFileId>>,
     next_fd: Fd,
     cwd: InodeIdentifier,
     pub log: Vec<String>,
     pub state: ProcessState,
+
     result: Option<ProcessResult>,
     pending_signals: LinkedList<Signal>,
 }
@@ -185,9 +189,7 @@ impl Process {
     }
 
     fn cloned_open_file(&mut self, fd: Fd) -> Option<Arc<OpenFileId>> {
-        self
-            .fds
-            .get(&fd).map(Arc::clone)
+        self.fds.get(&fd).map(Arc::clone)
     }
 
     fn take_open_file(&mut self, fd: Fd) -> Option<Arc<OpenFileId>> {
@@ -263,9 +265,7 @@ impl System {
 
     fn close_files(&mut self, open_files: impl Iterator<Item = Arc<OpenFileId>>) {
         for open_file_id in open_files {
-            if let Err(e) = self.vfs.close_file(open_file_id) {
-                println!("WARN: Failed to close file: {}", e);
-            }
+            self.vfs.close_file(open_file_id);
         }
     }
 }
@@ -299,7 +299,6 @@ impl ProcessHandle {
     }
 
     pub fn handle_signals(&self) {
-        //TODO if a child process dies, the parent should be notified with a signal?
         let active_handle = ActiveProcessHandle::new(self);
         self._handle_signals(active_handle);
     }
@@ -354,7 +353,9 @@ impl ProcessHandle {
     }
 
     pub fn sc_getpid(&self) -> Pid {
-        //TODO log
+        let active_handle = ActiveProcessHandle::new(self);
+        let mut processes = active_handle.process_table();
+        processes.current().log.push(format!("getpid()",));
         self.pid
     }
 
@@ -380,7 +381,8 @@ impl ProcessHandle {
             let (stdin, stdout) = match fds {
                 SpawnFds::Inherit => (
                     current_proc.cloned_open_file(0),
-                    current_proc.cloned_open_file(1) ,               ),
+                    current_proc.cloned_open_file(1),
+                ),
                 SpawnFds::Set(stdin, stdout) => (
                     current_proc.cloned_open_file(stdin),
                     current_proc.cloned_open_file(stdout),
@@ -417,7 +419,7 @@ impl ProcessHandle {
             active_handle.sys.vfs.ioctl(
                 open_file_id,
                 IoctlRequest::SetTerminalForegroundProcess(child_pid),
-            )?;
+            );
         }
 
         let mut spawn_queue = GLOBAL_PROCESS_SPAWN_QUEUE.lock().unwrap();
@@ -592,7 +594,8 @@ impl ProcessHandle {
         //from the file description table, if there are no
         //remaining references to it
 
-        active_context.sys.vfs.close_file(open_file_id)
+        active_context.sys.vfs.close_file(open_file_id);
+        Ok(())
     }
 
     pub fn sc_stat(&self, path: &str) -> SysResult<FileStat> {
@@ -617,7 +620,8 @@ impl ProcessHandle {
         // Release process lock before using VFS
         drop(processes);
 
-        active_context.sys.vfs.ioctl(open_file_id, req)
+        active_context.sys.vfs.ioctl(open_file_id, req);
+        Ok(())
     }
 
     pub fn sc_getdents(&self, fd: Fd) -> SysResult<Vec<DirectoryEntry>> {
@@ -630,7 +634,7 @@ impl ProcessHandle {
         };
 
         // unlock process table before calling VFS
-        active_context.sys.vfs.list_dir(open_file_id)
+        Ok(active_context.sys.vfs.list_dir(open_file_id))
     }
 
     pub fn sc_read(&self, fd: Fd, buf: &mut [u8]) -> SysResult<Option<usize>> {
@@ -806,7 +810,15 @@ impl Drop for ProcessHandle {
     /// depending on how the process exited.
     fn drop(&mut self) {
         let pid = self.pid;
-        let mut sys = self.shared_sys.lock().unwrap();
+        let mut sys = match self.shared_sys.lock() {
+            Ok(sys) => sys,
+            Err(_) => {
+                println!("CRITICAL ERROR: System lock was poisoned");
+                // We return to avoid clogging the stderr with a poison stacktrace.
+                // We just want to see the root cause in the logs.
+                return;
+            }
+        };
 
         eprintln!("{:?} getting processes in ProcessHandle::drop", pid);
 

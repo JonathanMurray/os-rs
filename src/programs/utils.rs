@@ -1,7 +1,6 @@
 use crate::sys::ProcessHandle;
 use crate::util::{FilePermissions, FileType};
 
-
 pub fn run_touch_proc(mut handle: ProcessHandle, args: Vec<String>) {
     match _run_touch_proc(&mut handle, args) {
         Ok(_) => {

@@ -42,9 +42,9 @@ pub async fn main() {
     let terminal_out = Arc::new(Mutex::new(Default::default()));
     let (devfs, terminal_in) = DevFilesystem::new(root_inode_id, Arc::clone(&terminal_out));
     vfs.mount_filesystem("dev".to_owned(), devfs);
-    let should_thread_exit = Arc::new(AtomicBool::new(false));
+    let should_terminal_thread_exit = Arc::new(AtomicBool::new(false));
     let terminal_driver_fut = {
-        let should_exit = Arc::clone(&should_thread_exit);
+        let should_exit = Arc::clone(&should_terminal_thread_exit);
         tokio::task::spawn_blocking(move || {
             terminal_driver::run(should_exit, terminal_in, terminal_out)
         })
@@ -62,7 +62,7 @@ pub async fn main() {
     let terminal_driver_fut = terminal_driver_fut.fuse();
     let init_fut = init_fut.fuse();
 
-    let mut futs = vec![
+    let mut tokio_threads = vec![
         (ThreadId::Pid(init_pid), init_fut),
         (ThreadId::TerminalDriver, terminal_driver_fut),
     ];
@@ -70,8 +70,8 @@ pub async fn main() {
     loop {
         let mut finished_threads = HashSet::new();
         let mut should_shut_down = false;
-        for (thread_id, f) in futs.iter_mut() {
-            match poll!(f) {
+        for (thread_id, future) in tokio_threads.iter_mut() {
+            match poll!(future) {
                 Poll::Pending => {}
                 Poll::Ready(result) => {
                     eprintln!("{:?} RESULT: {:?}", thread_id, result);
@@ -111,7 +111,7 @@ pub async fn main() {
                 }
             }
         }
-        futs.retain(|(pid, _)| !finished_threads.contains(pid));
+        tokio_threads.retain(|(pid, _)| !finished_threads.contains(pid));
         if should_shut_down {
             break;
         }
@@ -123,20 +123,20 @@ pub async fn main() {
             if let Some(new_handle) = spawn_queue.pop_back() {
                 let pid = new_handle.pid();
                 let f = tokio::task::spawn_blocking(move || run_program_proc(new_handle));
-                futs.push((ThreadId::Pid(pid), f.fuse()));
+                tokio_threads.push((ThreadId::Pid(pid), f.fuse()));
             }
         }
     }
 
     eprintln!("Exited loop in main method");
-    should_thread_exit.store(true, Ordering::Relaxed);
+    should_terminal_thread_exit.store(true, Ordering::Relaxed);
 
-    for (id, f) in futs {
+    for (id, future) in tokio_threads {
         // Wait for terminal driver to exit, so that we don't
         // exit the program with a messed up terminal state
         if id == ThreadId::TerminalDriver {
             eprintln!("Waiting for terminal driver to exit...");
-            join!(f).0.unwrap();
+            join!(future).0.unwrap();
         }
     }
 
@@ -305,7 +305,9 @@ fn run_program_proc(handle: ProcessHandle) {
         return;
     }
 
-    let mut f = FileReader::open(&handle, name).unwrap();
+    let mut f = FileReader::open(&handle, name).unwrap_or_else(|e| {
+        panic!("Failed to open {}: {}", name, e);
+    });
     let buf = f.read_fully().unwrap();
     f.close();
 

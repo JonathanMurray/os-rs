@@ -1,7 +1,6 @@
 use crate::programs::file_helpers::FileReader;
 use crate::sys::ProcessHandle;
 
-
 pub fn run_dump_proc(mut handle: ProcessHandle, args: Vec<String>) {
     match _run_dump_proc(&mut handle, args) {
         Ok(_) => {
