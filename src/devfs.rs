@@ -3,7 +3,7 @@ use crate::util::{
     DirectoryEntry, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier,
     OpenFileId, Pid, Uid,
 };
-use crate::vfs::Filesystem;
+use crate::vfs::{AccessMode, Filesystem, WriteError};
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Cursor, Read};
@@ -218,7 +218,7 @@ impl Filesystem for DevFilesystem {
         panic!("We shouldn't get here? devfs update_inode_parent")
     }
 
-    fn open(&mut self, inode_number: Ino, id: OpenFileId) -> Result<()> {
+    fn open(&mut self, inode_number: Ino, id: OpenFileId, _access_mode: AccessMode) -> Result<()> {
         eprintln!("devfs open({}, {:?})", inode_number, id);
         Ok(())
     }
@@ -243,13 +243,20 @@ impl Filesystem for DevFilesystem {
         }
     }
 
-    fn write(&mut self, inode_number: Ino, buf: &[u8], file_offset: usize) -> Result<usize> {
+    fn write(
+        &mut self,
+        inode_number: Ino,
+        buf: &[u8],
+        file_offset: usize,
+    ) -> std::result::Result<usize, WriteError> {
         if inode_number == INO_ROOT {
-            Err("dir".to_owned())
+            Err(WriteError::Unexpected("dir".to_owned()))
         } else if let Some((_inode, device)) = self.devices.get_mut(&inode_number) {
-            device.write(buf, file_offset)
+            device
+                .write(buf, file_offset)
+                .map_err(WriteError::Unexpected)
         } else {
-            Err("no such inode".to_owned())
+            Err(WriteError::Unexpected("no such inode".to_owned()))
         }
     }
 }
@@ -323,7 +330,7 @@ impl Device for TerminalDevice {
                         // We read the entire chunk, so remove it from the queue
                         terminal_input.pop_front();
                     }
-                    eprintln!("DEBUG: devfs read terminal input: '{:?}'", &buf[..n]);
+                    //eprintln!("DEBUG: devfs read terminal input: '{:?}'", &buf[..n]);
                     Ok(Some(n))
                 }
                 None => {
@@ -344,7 +351,7 @@ impl Device for TerminalDevice {
     }
 
     fn write(&mut self, buf: &[u8], _file_offset: usize) -> Result<usize> {
-        eprintln!("DEBUG devfs terminal write: {:?}", buf);
+        //eprintln!("DEBUG devfs terminal write: {:?}", buf);
         self.output.lock().unwrap().extend(buf);
         Ok(buf.len())
     }

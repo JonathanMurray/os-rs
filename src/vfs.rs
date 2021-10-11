@@ -1,3 +1,4 @@
+use crate::pipefs::PipeFilesystem;
 use crate::procfs::ProcFilesystem;
 use crate::regularfs::RegularFilesystem;
 use crate::sys::{GlobalProcessTable, IoctlRequest, OpenFlags, Process, GLOBAL_PROCESS_TABLE};
@@ -15,8 +16,25 @@ fn lock_global_process_table() -> MutexGuard<'static, GlobalProcessTable> {
 
 type Result<T> = core::result::Result<T, String>;
 
+#[derive(Debug, Eq, PartialEq)]
+pub enum AccessMode {
+    ReadOnly,
+    WriteOnly,
+    ReadWrite,
+}
+
+#[derive(Debug)]
+pub enum WriteError {
+    PipeClosedAtReadEnd,
+    Unexpected(String),
+}
+
 pub trait Filesystem: std::fmt::Debug + Send {
     fn root_inode_id(&self) -> InodeIdentifier;
+
+    fn pipe(&mut self) -> Result<Ino> {
+        Err("Only pipefs supports pipes".to_owned())
+    }
 
     fn ioctl(&mut self, inode_number: Ino, req: IoctlRequest) -> Result<()>;
 
@@ -46,7 +64,7 @@ pub trait Filesystem: std::fmt::Debug + Send {
 
     fn update_inode_parent(&mut self, inode_number: Ino, new_parent: InodeIdentifier) -> bool;
 
-    fn open(&mut self, inode_number: Ino, id: OpenFileId) -> Result<()>;
+    fn open(&mut self, inode_number: Ino, id: OpenFileId, access_mode: AccessMode) -> Result<()>;
 
     fn close(&mut self, id: OpenFileId);
 
@@ -58,7 +76,12 @@ pub trait Filesystem: std::fmt::Debug + Send {
         file_offset: usize,
     ) -> Result<Option<usize>>;
 
-    fn write(&mut self, inode_number: Ino, buf: &[u8], file_offset: usize) -> Result<usize>;
+    fn write(
+        &mut self,
+        inode_number: Ino,
+        buf: &[u8],
+        file_offset: usize,
+    ) -> std::result::Result<usize, WriteError>;
 }
 
 /// aka file description (POSIX) or file handle
@@ -89,9 +112,12 @@ impl VirtualFilesystemSwitch {
                 procfs.root_inode_id(),
             )
             .expect("Add proc to root dir");
+        let pipefs = PipeFilesystem::new();
+
         let mut fs: HashMap<FilesystemId, Box<dyn Filesystem>> = HashMap::new();
         fs.insert(FilesystemId::Main, Box::new(mainfs));
         fs.insert(FilesystemId::Proc, Box::new(procfs));
+        fs.insert(FilesystemId::Pipe, Box::new(pipefs));
 
         Self {
             fs,
@@ -290,6 +316,7 @@ impl VirtualFilesystemSwitch {
         flags: OpenFlags,
         creation_file_permissions: Option<FilePermissions>,
     ) -> SysResult<Arc<OpenFileId>> {
+        let access_mode = parse_access_mode(flags).ok_or(Ecode::Einval)?;
         let parts: Vec<&str> = path.split('/').collect();
         let inode = match self.resolve_from_parts(&parts, cwd) {
             Some(inode) => inode,
@@ -335,15 +362,78 @@ impl VirtualFilesystemSwitch {
 
         //TODO do we need to delegate this, or is it enough that the
         //VFS keeps track of open files?
-        fs.open(inode_id.number, open_file_id).unwrap();
+        fs.open(inode_id.number, open_file_id, access_mode).unwrap();
         Ok(fd_reference)
     }
 
-    pub fn close_file(&mut self, id: Arc<OpenFileId>) {
-        let id = *id.as_ref(); // this releases the reference
+    pub fn create_pipe(&mut self) -> (Arc<OpenFileId>, Arc<OpenFileId>) {
+        let pipefs = self
+            .fs
+            .get_mut(&FilesystemId::Pipe)
+            .expect("pipefs must exist");
+
+        let inode_number = pipefs.pipe().unwrap();
+        let inode_id = InodeIdentifier {
+            filesystem_id: FilesystemId::Pipe,
+            number: inode_number,
+        };
+
+        //TODO This is all weird. Pipefs doesn't care about us
+        // opening / closing the pipe
+
+        // Set up the read-end
+        let read_id = self.next_open_file_id;
+        let read_fd_reference = Arc::new(read_id);
+        self.open_files.insert(
+            read_id,
+            OpenFile {
+                inode_id,
+                offset: 0,
+                fd_references: Arc::downgrade(&read_fd_reference),
+            },
+        );
+        self.next_open_file_id = OpenFileId(self.next_open_file_id.0 + 1);
+        pipefs
+            .open(inode_number, read_id, AccessMode::ReadOnly)
+            .unwrap();
+
+        // Set up the write end
+        let write_id = self.next_open_file_id;
+        let write_fd_reference = Arc::new(write_id);
+        self.open_files.insert(
+            write_id,
+            OpenFile {
+                inode_id,
+                offset: 0,
+                fd_references: Arc::downgrade(&write_fd_reference),
+            },
+        );
+        self.next_open_file_id = OpenFileId(self.next_open_file_id.0 + 1);
+        pipefs
+            .open(inode_number, write_id, AccessMode::WriteOnly)
+            .unwrap();
+
+        (read_fd_reference, write_fd_reference)
+    }
+
+    pub fn close_file(&mut self, ref_counted_id: Arc<OpenFileId>) {
+        eprintln!(
+            "DEBUG: VFS close_file({:?}) strong count before release: {}",
+            ref_counted_id,
+            Arc::strong_count(&ref_counted_id)
+        );
+        let id: OpenFileId = *ref_counted_id;
+        drop(ref_counted_id); //one less fd that refers to this OpenFile
 
         let open_file = &self.open_files[&id];
-        let some_fd_remains = open_file.fd_references.upgrade().is_some();
+        let some_fd_remains = open_file.fd_references.strong_count() > 0;
+
+        eprintln!(
+            "DEBUG: VFS close_file({:?}) - some fd remains? {}. strong count: {}",
+            id,
+            some_fd_remains,
+            open_file.fd_references.strong_count()
+        );
         if !some_fd_remains {
             let fs = self.fs.get_mut(&open_file.inode_id.filesystem_id).unwrap();
             self.open_files.remove(&id);
@@ -396,7 +486,11 @@ impl VirtualFilesystemSwitch {
         };
 
         let fs = self.fs.get_mut(&inode_id.filesystem_id).unwrap();
-        let n_read = fs.write(inode_id.number, buf, offset).unwrap();
+        let n_read = match fs.write(inode_id.number, buf, offset) {
+            Ok(n) => Ok(n),
+            Err(WriteError::PipeClosedAtReadEnd) => Err(Ecode::Epipe),
+            Err(other_error) => panic!("Unexpected write error: {:?}", other_error),
+        }?;
 
         let open_file = self.get_open_file_mut(open_file_id);
         open_file.offset += n_read;
@@ -511,5 +605,17 @@ impl VirtualFilesystemSwitch {
     fn inode(&self, inode_id: InodeIdentifier) -> Option<Inode> {
         let fs = self.fs.get(&inode_id.filesystem_id).unwrap();
         fs.inode(inode_id.number)
+    }
+}
+
+fn parse_access_mode(flags: OpenFlags) -> Option<AccessMode> {
+    let r = flags.contains(OpenFlags::READ_ONLY);
+    let w = flags.contains(OpenFlags::WRITE_ONLY);
+    let rw = flags.contains(OpenFlags::READ_WRITE);
+    match (r, w, rw) {
+        (true, false, false) => Some(AccessMode::ReadOnly),
+        (false, true, false) => Some(AccessMode::WriteOnly),
+        (false, false, true) => Some(AccessMode::ReadWrite),
+        _ => None,
     }
 }

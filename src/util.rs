@@ -26,6 +26,7 @@ pub enum FileType {
     Regular,
     Directory,
     CharacterDevice,
+    Pipe,
 }
 
 #[derive(PartialEq, Debug, Copy, Clone)]
@@ -83,6 +84,7 @@ pub enum FilesystemId {
     Main,
     Proc,
     Dev,
+    Pipe,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -124,6 +126,9 @@ pub enum Ecode {
     /// Interrupted
     Eintr,
 
+    /// Invalid argument
+    Einval,
+
     /// Is directory
     Eisdir,
 
@@ -148,6 +153,9 @@ pub enum Ecode {
     /// Operation not permitted
     Eperm,
 
+    /// Broken pipe
+    Epipe,
+
     /// Improper link
     Exdev,
 
@@ -159,6 +167,7 @@ impl std::fmt::Display for Ecode {
         match self {
             Ecode::Eacces => write!(f, "Permission denied"),
             Ecode::Eintr => write!(f, "Interrupted"),
+            Ecode::Einval => write!(f, "Invalid argument"),
             Ecode::Eisdir => write!(f, "Is a directory"),
             Ecode::Enotdir => write!(f, "Not a directory"),
             Ecode::Enoent => write!(f, "No such file or directory"),
@@ -167,6 +176,7 @@ impl std::fmt::Display for Ecode {
             Ecode::Eexist => write!(f, "File exists"),
             Ecode::Esrch => write!(f, "No such process"),
             Ecode::Eperm => write!(f, "Operation not permitted"),
+            Ecode::Epipe => write!(f, "Broken pipe"),
             Ecode::Exdev => write!(f, "Improper link"),
             Ecode::Custom(s) => write!(f, "{}", s),
         }

@@ -7,7 +7,7 @@ pub fn run_touch_proc(mut handle: ProcessHandle, args: Vec<String>) {
             handle.sc_exit(0);
         }
         Err(e) => {
-            handle.stdout(format!("Error: {}\n", e)).unwrap();
+            handle.stderr(format!("Error: {}\n", e)).unwrap();
             handle.sc_exit(1);
         }
     }

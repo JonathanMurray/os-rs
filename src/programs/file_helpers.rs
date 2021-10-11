@@ -9,7 +9,7 @@ pub struct FileReader<'a> {
 
 impl<'a> FileReader<'a> {
     pub fn open(handle: &'a ProcessHandle, path: &'a str) -> SysResult<Self> {
-        let fd = handle.sc_open(path, OpenFlags::empty(), None)?;
+        let fd = handle.sc_open(path, OpenFlags::READ_ONLY, None)?;
         Ok(Self {
             path,
             fd: Some(fd),

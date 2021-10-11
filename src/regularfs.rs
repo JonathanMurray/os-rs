@@ -8,7 +8,7 @@ use crate::util::{
     DirectoryEntry, Ecode, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier,
     OpenFileId, Uid,
 };
-use crate::vfs::Filesystem;
+use crate::vfs::{AccessMode, Filesystem, WriteError};
 
 type Directory = HashMap<String, InodeIdentifier>;
 type RegularFile = Vec<u8>;
@@ -42,6 +42,7 @@ impl File {
                 open_ids: Default::default(),
             },
             FileType::CharacterDevice => panic!("Cannot create character device on regular fs"),
+            FileType::Pipe => panic!("Cannot create pipe on regular fs"),
         }
     }
 }
@@ -339,7 +340,7 @@ impl Filesystem for RegularFilesystem {
         self.update_inode_parent(inode_number, new_parent)
     }
 
-    fn open(&mut self, inode_number: Ino, id: OpenFileId) -> Result<()> {
+    fn open(&mut self, inode_number: Ino, id: OpenFileId, _access_mode: AccessMode) -> Result<()> {
         self.open_file(inode_number, id)
     }
 
@@ -357,7 +358,13 @@ impl Filesystem for RegularFilesystem {
         self.read_file_at_offset(inode_number, buf, file_offset)
     }
 
-    fn write(&mut self, inode_number: Ino, buf: &[u8], file_offset: usize) -> Result<usize> {
+    fn write(
+        &mut self,
+        inode_number: Ino,
+        buf: &[u8],
+        file_offset: usize,
+    ) -> std::result::Result<usize, WriteError> {
         self.write_file_at_offset(inode_number, buf, file_offset)
+            .map_err(WriteError::Unexpected)
     }
 }

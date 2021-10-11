@@ -8,7 +8,7 @@ use crate::util::{
     DirectoryEntry, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier,
     OpenFileId, Pid, Uid,
 };
-use crate::vfs::Filesystem;
+use crate::vfs::{AccessMode, Filesystem, WriteError};
 
 fn lock_global_process_table() -> MutexGuard<'static, GlobalProcessTable> {
     // LOCKING: VFS must never be accessed while holding this lock
@@ -253,7 +253,12 @@ impl Filesystem for ProcFilesystem {
         panic!("We shouldn't get here? procfs update_inode_parent")
     }
 
-    fn open(&mut self, inode_number: Ino, open_file_id: OpenFileId) -> Result<()> {
+    fn open(
+        &mut self,
+        inode_number: Ino,
+        open_file_id: OpenFileId,
+        _access_mode: AccessMode,
+    ) -> Result<()> {
         eprintln!("procfs open({}, {:?})", inode_number, open_file_id);
         self.open_file(inode_number, open_file_id)
     }
@@ -273,7 +278,12 @@ impl Filesystem for ProcFilesystem {
         self.read_file_at_offset(id, buf, file_offset)
     }
 
-    fn write(&mut self, _inode_number: Ino, _buf: &[u8], _file_offset: usize) -> Result<usize> {
-        Err("Can't write to procfs".to_owned())
+    fn write(
+        &mut self,
+        _inode_number: Ino,
+        _buf: &[u8],
+        _file_offset: usize,
+    ) -> std::result::Result<usize, WriteError> {
+        Err(WriteError::Unexpected("Can't write to procfs".to_owned()))
     }
 }

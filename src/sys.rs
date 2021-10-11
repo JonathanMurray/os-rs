@@ -7,7 +7,7 @@ use crate::vfs::VirtualFilesystemSwitch;
 use bitflags::bitflags;
 use once_cell::sync::Lazy;
 
-use std::collections::{HashMap, LinkedList};
+use std::collections::{hash_map, HashMap, LinkedList};
 use std::fmt::Display;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -31,6 +31,13 @@ pub static GLOBAL_PROCESS_TABLE: Lazy<Mutex<GlobalProcessTable>> = Lazy::new(|| 
 pub static GLOBAL_PROCESS_SPAWN_QUEUE: Lazy<Mutex<LinkedList<ProcessHandle>>> =
     Lazy::new(Default::default);
 
+/// stdin, stdout, stderr
+type StandardFds = (
+    Option<Arc<OpenFileId>>,
+    Option<Arc<OpenFileId>>,
+    Option<Arc<OpenFileId>>,
+);
+
 #[derive(Debug)]
 pub struct GlobalProcessTable {
     next_pid: Pid,
@@ -44,7 +51,7 @@ impl GlobalProcessTable {
         args: Vec<String>,
         parent_pid: Pid,
         uid: Uid,
-        fds: (Option<Arc<OpenFileId>>, Option<Arc<OpenFileId>>),
+        fds: StandardFds,
         cwd: InodeIdentifier,
     ) -> Pid {
         let pid = self.next_pid;
@@ -126,7 +133,7 @@ impl Process {
         parent_pid: Pid,
         uid: Uid,
         args: Vec<String>,
-        fds: (Option<Arc<OpenFileId>>, Option<Arc<OpenFileId>>),
+        fds: StandardFds,
         cwd: InodeIdentifier,
     ) -> Self {
         let mut next_fd = 0;
@@ -139,7 +146,10 @@ impl Process {
             fd_map.insert(1, stdout);
             next_fd = 2;
         }
-
+        if let Some(stderr) = fds.2 {
+            fd_map.insert(2, stderr);
+            next_fd = 3;
+        }
         Process {
             pid,
             parent_pid,
@@ -166,22 +176,22 @@ impl Process {
         None
     }
 
-    fn set_fd_to_same_as(&mut self, dst_fd: Fd, src_fd: Fd) -> bool {
-        if let Some(open_file_id) = self.fds.get(&src_fd) {
-            //TODO newfd should not be required to be open.
-            //      https://man7.org/linux/man-pages/man2/dup.2.html#ERRORS
-            //          If the file descriptor newfd was previously open, it is closed
-            //          before being reused; the close is performed silently (i.e., any
-            //          errors during the close are not reported by dup2()).
-            if !self.fds.contains_key(&dst_fd) {
-                return false;
-            }
+    fn add_open_file(&mut self, open_file_id: Arc<OpenFileId>) -> Fd {
+        let fd = self.next_fd;
+        eprintln!("{:?} adding {:?} => {:?}", self.pid, fd, open_file_id);
+        self.fds.insert(fd, open_file_id);
+        self.next_fd += 1;
+        fd
+    }
 
-            let cloned_ref = Arc::clone(open_file_id);
-            self.fds.insert(dst_fd, cloned_ref);
-            return true;
+    fn insert_open_file(&mut self, fd: Fd, open_file_id: Arc<OpenFileId>) -> bool {
+        match self.fds.entry(fd) {
+            hash_map::Entry::Vacant(e) => {
+                e.insert(open_file_id);
+                true
+            }
+            hash_map::Entry::Occupied(_) => false,
         }
-        false
     }
 
     fn find_open_file(&mut self, fd: Fd) -> SysResult<OpenFileId> {
@@ -252,7 +262,7 @@ impl System {
         args: Vec<String>,
         parent_pid: Pid,
         uid: Uid,
-        fds: (Option<Arc<OpenFileId>>, Option<Arc<OpenFileId>>),
+        fds: StandardFds,
         cwd: InodeIdentifier,
     ) -> ProcessHandle {
         let pid = processes.add(args, parent_pid, uid, fds, cwd);
@@ -290,8 +300,33 @@ impl ProcessHandle {
         self.pid
     }
 
+    pub fn sc_pipe(&self) -> SysResult<(Fd, Fd)> {
+        let mut active_handle = ActiveProcessHandle::new(self);
+        {
+            let mut processes = active_handle.process_table();
+            let current_proc = processes.current();
+            current_proc.log.push("pipe()".to_owned());
+        }
+        //Release process lock before using VFS
+
+        let (read_open_file_id, write_open_file_id) = active_handle.sys.vfs.create_pipe();
+
+        eprintln!(
+            "DEBUG: in sc_pipe, strong counts: read={}, write={}",
+            Arc::strong_count(&read_open_file_id),
+            Arc::strong_count(&write_open_file_id)
+        );
+
+        let mut processes = active_handle.process_table();
+        let current_proc = processes.current();
+        let read_fd = current_proc.add_open_file(read_open_file_id);
+        let write_fd = current_proc.add_open_file(write_open_file_id);
+        Ok((read_fd, write_fd))
+    }
+
     pub fn sc_sigaction(&self, signal: Signal, handler: Box<dyn SignalHandler>) {
         let _active_handle = ActiveProcessHandle::new(self);
+        //TODO log
         self.signal_handlers.lock().unwrap().insert(signal, handler);
         //https://man7.org/linux/man-pages/man2/sigaction.2.html
         //int sigaction(int signum, const struct sigaction *restrict act,
@@ -352,10 +387,21 @@ impl ProcessHandle {
         Ok(())
     }
 
+    pub fn stderr(&self, s: impl Display) -> SysResult<()> {
+        let output = format!("{}", s);
+        let n_written = self.sc_write(2, output.as_bytes())?;
+        assert_eq!(
+            n_written,
+            output.len(),
+            "We didn't write all the output to stdout"
+        );
+        Ok(())
+    }
+
     pub fn sc_getpid(&self) -> Pid {
         let active_handle = ActiveProcessHandle::new(self);
         let mut processes = active_handle.process_table();
-        processes.current().log.push(format!("getpid()",));
+        processes.current().log.push("getpid()".to_owned());
         self.pid
     }
 
@@ -378,22 +424,27 @@ impl ProcessHandle {
                 args, fds, uid, action
             ));
 
-            let (stdin, stdout) = match fds {
+            let (stdin, stdout, stderr) = match fds {
                 SpawnFds::Inherit => (
                     current_proc.cloned_open_file(0),
                     current_proc.cloned_open_file(1),
+                    current_proc.cloned_open_file(2),
                 ),
-                SpawnFds::Set(stdin, stdout) => (
+                SpawnFds::Set(stdin, stdout, stderr) => (
                     current_proc.cloned_open_file(stdin),
                     current_proc.cloned_open_file(stdout),
+                    current_proc.cloned_open_file(stderr),
                 ),
             };
             let child_uid = match uid {
                 SpawnUid::Inherit => current_proc.uid,
                 SpawnUid::Uid(uid) => uid,
             };
-            eprintln!("Spawning {:?}. Stdout={:?}, Uid={:?}", args, stdin, stdout,);
-            eprintln!("Current proc open files: {:?}", current_proc.fds);
+            eprintln!(
+                "Spawning {:?}. Stdin={:?}, Stdout={:?}, Uid={:?}",
+                args, stdin, stdout, uid
+            );
+            eprintln!("(Current proc open files: {:?})", current_proc.fds);
             let cwd = current_proc.cwd;
             System::spawn_process(
                 processes,
@@ -401,11 +452,12 @@ impl ProcessHandle {
                 args,
                 self_pid,
                 child_uid,
-                (stdin, stdout),
+                (stdin, stdout, stderr),
                 cwd,
             )
         };
         let child_pid = child_handle.pid;
+        eprintln!("Spawned pid={:?}", child_pid);
 
         if let Some(SpawnAction::ClaimTerminal(terminal_fd)) = action {
             let mut active_handle = ActiveProcessHandle::new(self);
@@ -556,7 +608,7 @@ impl ProcessHandle {
             "open({:?}, {:?}, {:?})",
             path, flags, creation_file_permissions
         ));
-        let (cwd, fd) = (proc.cwd, proc.next_fd);
+        let cwd = proc.cwd;
         // Release process lock before using VFS
         drop(processes);
 
@@ -564,15 +616,10 @@ impl ProcessHandle {
 
         let open_file_id = vfs.open_file(path, cwd, flags, creation_file_permissions)?;
 
-        eprintln!(
-            "In sc_open: Opened fd {} with open_file_id: {:?}",
-            fd, open_file_id
-        );
-
         let mut processes = active_context.process_table();
         let proc = processes.current();
-        proc.fds.insert(proc.next_fd, open_file_id);
-        proc.next_fd += 1;
+        let fd = proc.add_open_file(open_file_id);
+
         Ok(fd)
     }
 
@@ -792,15 +839,28 @@ impl ProcessHandle {
     }
 
     pub fn sc_dup2(&self, oldfd: Fd, newfd: Fd) -> SysResult<()> {
-        let active_context = ActiveProcessHandle::new(self);
+        let mut active_context = ActiveProcessHandle::new(self);
         let mut processes = active_context.process_table();
         let proc = processes.current();
         proc.log.push(format!("dup2({:?}, {:?})", oldfd, newfd));
 
-        if proc.set_fd_to_same_as(newfd, oldfd) {
+        let dst_open_file_id = proc.take_open_file(newfd);
+
+        drop(processes);
+        // unlock process table before calling VFS
+
+        if let Some(open_file_id) = dst_open_file_id {
+            active_context.sys.vfs.close_file(open_file_id);
+        }
+
+        let mut processes = active_context.process_table();
+        let proc = processes.current();
+
+        let cloned_open_file_id = proc.cloned_open_file(oldfd).ok_or(Ecode::Ebadf)?;
+        if proc.insert_open_file(newfd, cloned_open_file_id) {
             Ok(())
         } else {
-            Err(Ecode::Ebadf)
+            Err(Ecode::Custom("failed to insert fd".to_owned()))
         }
     }
 }
@@ -854,7 +914,7 @@ pub enum WaitPidOptions {
 #[derive(Debug)]
 pub enum SpawnFds {
     Inherit,
-    Set(Fd, Fd),
+    Set(Fd, Fd, Fd),
 }
 
 #[derive(Debug)]
@@ -877,6 +937,9 @@ bitflags! {
     pub struct OpenFlags: u8 {
         const CREATE  = 0b0000_0001;
         const TRUNCATE  = 0b0000_0010;
+        const READ_ONLY = 0b0000_0100;
+        const WRITE_ONLY = 0b0000_1000;
+        const READ_WRITE = 0b0001_0000;
     }
 }
 
@@ -910,6 +973,7 @@ impl<'a> ActiveProcessHandle<'a> {
         }
     }
 
+    //TODO: how to prevent this being called twice? Should it take a &mut self?
     fn process_table(&self) -> MutexGuard<'_, GlobalProcessTable> {
         // LOCKING: System is locked - we own a MutexGuard
         GLOBAL_PROCESS_TABLE.lock().unwrap()
@@ -954,7 +1018,7 @@ mod tests {
             vec!["test".to_owned()],
             Pid(1),
             Uid(1),
-            (None, None),
+            (None, None, None),
             InodeIdentifier {
                 filesystem_id: FilesystemId::Main,
                 number: 0,
@@ -1014,7 +1078,7 @@ mod tests {
             .unwrap();
         assert_eq!(proc.sc_stat("/myfile").unwrap().size, 0);
 
-        let fd = proc.sc_open("/myfile", OpenFlags::empty(), None).unwrap();
+        let fd = proc.sc_open("/myfile", OpenFlags::READ_ONLY, None).unwrap();
         proc.sc_write(fd, &[1, 2, 3]).unwrap();
         assert_eq!(proc.sc_stat("/myfile").unwrap().size, 3);
     }
@@ -1025,7 +1089,7 @@ mod tests {
         let proc = setup();
         proc.sc_create("/myfile", FileType::Regular, FilePermissions::new(7, 7))
             .unwrap();
-        let fd = proc.sc_open("/myfile", OpenFlags::empty(), None).unwrap();
+        let fd = proc.sc_open("/myfile", OpenFlags::READ_ONLY, None).unwrap();
         proc.sc_close(fd).unwrap();
     }
 
@@ -1035,7 +1099,7 @@ mod tests {
         let proc = setup();
         proc.sc_create("/myfile", FileType::Regular, FilePermissions::new(7, 7))
             .unwrap();
-        let fd = proc.sc_open("/myfile", OpenFlags::empty(), None).unwrap();
+        let fd = proc.sc_open("/myfile", OpenFlags::READ_ONLY, None).unwrap();
         proc.sc_write(fd, &[0, 10, 20, 30]).unwrap();
         let buf = &mut [0, 0];
         proc.sc_seek(fd, 1).unwrap();
@@ -1050,7 +1114,7 @@ mod tests {
     }
 
     fn list_dir(ctx: &ProcessHandle, path: &str) -> Vec<String> {
-        let fd = ctx.sc_open(path, OpenFlags::empty(), None).unwrap();
+        let fd = ctx.sc_open(path, OpenFlags::READ_ONLY, None).unwrap();
         let dents = ctx.sc_getdents(fd).unwrap();
         ctx.sc_close(fd).unwrap();
         dents.into_iter().map(|e| e.name).collect()

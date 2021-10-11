@@ -278,6 +278,9 @@ impl CurrentLine {
     }
 
     fn char(&mut self, ch: char) {
+        //TODO:
+        //BUG: We seem to only handle ascii. Input two non-ascii chars
+        // and get assertion failed: self.is_char_boundary(idx)
         self.s.insert(self.pos, ch);
         self.pos += 1;
     }
