@@ -353,8 +353,14 @@ impl ProcessHandle {
     }
 
     pub fn sc_sigaction(&self, signal: Signal, handler: Box<dyn SignalHandler>) {
-        let _active_handle = ActiveProcessHandle::new(self);
-        //TODO log
+        let active_handle = ActiveProcessHandle::new(self);
+        {
+            let mut processes = active_handle.process_table();
+            let current_proc = processes.current();
+            current_proc
+                .log
+                .push(format!("sigaction({:?}, <handler>)", signal));
+        }
         self.signal_handlers.lock().unwrap().insert(signal, handler);
         //https://man7.org/linux/man-pages/man2/sigaction.2.html
         //int sigaction(int signum, const struct sigaction *restrict act,

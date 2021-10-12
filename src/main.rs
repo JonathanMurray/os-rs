@@ -109,7 +109,8 @@ pub async fn main() {
             break;
         }
 
-        std::thread::sleep(Duration::from_millis(20));
+        // is this sleep needed?
+        std::thread::sleep(Duration::from_millis(5));
 
         {
             let mut spawn_queue = sys::GLOBAL_PROCESS_SPAWN_QUEUE.lock().unwrap();
