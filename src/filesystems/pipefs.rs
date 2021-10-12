@@ -6,7 +6,7 @@ use crate::util::{
     DirectoryEntry, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier,
     OpenFileId, Uid,
 };
-use crate::vfs::{AccessMode, Filesystem, WriteError};
+use crate::filesystems::{AccessMode, WriteError, Filesystem};
 
 const ROOT_INODE_NUMBER: Ino = 0;
 

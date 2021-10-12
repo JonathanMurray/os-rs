@@ -1,4 +1,4 @@
-use crate::devfs::TerminalInputFeeder;
+use crate::filesystems::devfs::TerminalInputFeeder;
 use crate::sys::GLOBAL_PROCESS_TABLE;
 
 use std::io;

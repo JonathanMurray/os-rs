@@ -1,8 +1,5 @@
-mod devfs;
-mod pipefs;
-mod procfs;
+mod filesystems;
 mod programs;
-mod regularfs;
 mod sys;
 mod terminal_driver;
 mod util;
@@ -16,7 +13,7 @@ use std::time::Duration;
 
 use futures::{join, poll, FutureExt};
 
-use crate::devfs::DevFilesystem;
+use crate::filesystems::devfs::DevFilesystem;
 use crate::sys::{
     OpenFlags, ProcessHandle, ProcessResult, ProcessWasKilledPanic, SpawnAction, SpawnFds,
     SpawnUid, System, WaitPidOptions, WaitPidTarget, GLOBAL_PROCESS_TABLE,

@@ -8,7 +8,7 @@ use crate::util::{
     DirectoryEntry, Ecode, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier,
     OpenFileId, Uid,
 };
-use crate::vfs::{AccessMode, Filesystem, WriteError};
+use crate::filesystems::{AccessMode, WriteError, Filesystem};
 
 type Directory = HashMap<String, InodeIdentifier>;
 type RegularFile = Vec<u8>;

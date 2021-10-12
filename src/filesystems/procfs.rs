@@ -8,7 +8,7 @@ use crate::util::{
     DirectoryEntry, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier,
     OpenFileId, Pid, Uid,
 };
-use crate::vfs::{AccessMode, Filesystem, WriteError};
+use crate::filesystems::{AccessMode, WriteError, Filesystem};
 
 fn lock_global_process_table() -> MutexGuard<'static, GlobalProcessTable> {
     // LOCKING: VFS must never be accessed while holding this lock

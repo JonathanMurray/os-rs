@@ -1,9 +1,9 @@
+use crate::filesystems::{AccessMode, Filesystem, WriteError};
 use crate::sys::{IoctlRequest, Signal, GLOBAL_PROCESS_TABLE};
 use crate::util::{
     DirectoryEntry, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier,
     OpenFileId, Pid, Uid,
 };
-use crate::vfs::{AccessMode, Filesystem, WriteError};
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Cursor, Read};
