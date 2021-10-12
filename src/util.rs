@@ -123,6 +123,9 @@ pub enum Ecode {
     /// Permission denied
     Eacces,
 
+    /// Resource temporarily unavailable
+    Eagain,
+
     /// Interrupted
     Eintr,
 
@@ -166,6 +169,7 @@ impl std::fmt::Display for Ecode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
         match self {
             Ecode::Eacces => write!(f, "Permission denied"),
+            Ecode::Eagain => write!(f, "Resource temporarily unavailable"),
             Ecode::Eintr => write!(f, "Interrupted"),
             Ecode::Einval => write!(f, "Invalid argument"),
             Ecode::Eisdir => write!(f, "Is a directory"),

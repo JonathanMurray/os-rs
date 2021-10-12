@@ -455,11 +455,7 @@ impl VirtualFilesystemSwitch {
         fs.ioctl(inode_number, req).unwrap();
     }
 
-    pub fn read_file(
-        &mut self,
-        open_file_id: OpenFileId,
-        buf: &mut [u8],
-    ) -> SysResult<Option<usize>> {
+    pub fn read_file(&mut self, open_file_id: OpenFileId, buf: &mut [u8]) -> SysResult<usize> {
         let (inode_id, offset) = {
             let open_file = self.get_open_file_mut(open_file_id);
             (open_file.inode_id, open_file.offset)
@@ -473,12 +469,12 @@ impl VirtualFilesystemSwitch {
         let n_read = match fs.read(inode_id.number, open_file_id, buf, offset).unwrap() {
             Some(n) => n,
             // Would need to block
-            None => return Ok(None),
+            None => return Err(Ecode::Eagain),
         };
 
         let open_file = self.get_open_file_mut(open_file_id);
         open_file.offset += n_read;
-        Ok(Some(n_read))
+        Ok(n_read)
     }
 
     pub fn write_file(&mut self, open_file_id: OpenFileId, buf: &[u8]) -> SysResult<usize> {

@@ -43,8 +43,6 @@ pub fn _run_file_proc(handle: &mut ProcessHandle, args: Vec<String>) -> (u32, St
         Ok(n) => n,
     };
 
-    let n = n.expect("TODO: handle blocking file read");
-
     if n == 0 {
         return (0, "Empty file".to_owned());
     }

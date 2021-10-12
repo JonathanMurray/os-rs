@@ -1,5 +1,5 @@
 use crate::sys::{OpenFlags, ProcessHandle, SeekOffset};
-use crate::util::{Ecode, Fd, FileStat, SysResult};
+use crate::util::{Fd, FileStat, SysResult};
 
 pub struct FileReader<'a> {
     path: &'a str,
@@ -21,7 +21,7 @@ impl<'a> FileReader<'a> {
         self.handle.sc_stat(self.path)
     }
 
-    pub fn read(&mut self, buf: &mut [u8]) -> SysResult<Option<usize>> {
+    pub fn read(&mut self, buf: &mut [u8]) -> SysResult<usize> {
         self.handle.sc_read(self.fd.unwrap(), buf)
     }
 
@@ -30,12 +30,9 @@ impl<'a> FileReader<'a> {
         let mut buf = [0; 1024];
         loop {
             match self.handle.sc_read(self.fd.unwrap(), &mut buf) {
-                Ok(Some(0)) => return Ok(vec),
-                Ok(Some(n)) => {
+                Ok(0) => return Ok(vec),
+                Ok(n) => {
                     vec.extend(&buf[..n]);
-                }
-                Ok(None) => {
-                    return Err(Ecode::Custom("Would need to block to read".to_owned()));
                 }
                 Err(e) => return Err(e),
             }

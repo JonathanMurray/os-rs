@@ -88,9 +88,8 @@ impl ShellProcess {
                 self.handle.handle_signals();
 
                 match self.handle.sc_read(0, &mut buf) {
-                    Ok(Some(n)) => break n,
-                    Ok(None) => {
-                        // Would need to block to get input
+                    Ok(n) => break n,
+                    Err(Ecode::Eagain) => {
                         std::thread::sleep(Duration::from_millis(10));
                     }
                     Err(e) => {

@@ -29,8 +29,8 @@ fn _run(handle: &mut ProcessHandle, path: &str) -> Result<()> {
     let mut buf = [0; 1024];
     // This program can only finish by being interrupted/killed
     loop {
-        match f.read(&mut buf)? {
-            None | Some(0) => {
+        match f.read(&mut buf) {
+            Err(Ecode::Eagain) | Ok(0) => {
                 eprintln!("[tail] nothing to read...");
                 match handle.sc_nanosleep(Duration::from_millis(100)) {
                     Ok(_) | Err(Ecode::Eintr) => Ok(()),
@@ -38,10 +38,11 @@ fn _run(handle: &mut ProcessHandle, path: &str) -> Result<()> {
                 }?;
                 continue;
             }
-            Some(n) => {
+            Ok(n) => {
                 eprintln!("[tail] We got {} bytes", n);
                 handle.sc_write(1, &buf[..n]).unwrap();
             }
+            Err(e) => return Err(e.into()),
         }
     }
 }

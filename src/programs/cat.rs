@@ -1,5 +1,5 @@
 use crate::sys::{OpenFlags, ProcessHandle};
-use crate::util::Fd;
+use crate::util::{Ecode, Fd};
 use std::time::Duration;
 
 type Result<T> = std::result::Result<T, String>;
@@ -26,15 +26,13 @@ fn cat_fd(handle: &mut ProcessHandle, fd: Fd) -> Result<()> {
     let count = 256;
     loop {
         handle.handle_signals();
-        match handle
-            .sc_sendfile(1, fd, count)
-            .map_err(|e| format!("{}", e))?
-        {
-            Some(0) => break, //EOF
-            None => {
+        match handle.sc_sendfile(1, fd, count) {
+            Ok(0) => break, //EOF
+            Ok(_) => {}
+            Err(Ecode::Eagain) => {
                 std::thread::sleep(Duration::from_millis(10));
             }
-            _ => {}
+            Err(e) => return Err(e.into()),
         }
     }
     Ok(())

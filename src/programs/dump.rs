@@ -24,8 +24,6 @@ pub fn _run_dump_proc(handle: &mut ProcessHandle, args: Vec<String>) -> Result<(
             .read(&mut buf)
             .map_err(|e| format!("Failed to read {}: {}", path, e))?;
 
-        let n = n.expect("TODO: handle blocking file read");
-
         if n == 0 {
             break;
         }

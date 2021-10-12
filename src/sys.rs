@@ -714,7 +714,7 @@ impl ProcessHandle {
         Ok(active_context.sys.vfs.list_dir(open_file_id))
     }
 
-    pub fn sc_read(&self, fd: Fd, buf: &mut [u8]) -> SysResult<Option<usize>> {
+    pub fn sc_read(&self, fd: Fd, buf: &mut [u8]) -> SysResult<usize> {
         let mut active_context = ActiveProcessHandle::new(self);
 
         let open_file_id = {
@@ -747,7 +747,7 @@ impl ProcessHandle {
         Ok(num_written)
     }
 
-    pub fn sc_sendfile(&self, out_fd: Fd, in_fd: Fd, count: usize) -> SysResult<Option<usize>> {
+    pub fn sc_sendfile(&self, out_fd: Fd, in_fd: Fd, count: usize) -> SysResult<usize> {
         let mut active_context = ActiveProcessHandle::new(self);
         let (in_file_id, out_file_id) = {
             let mut processes = active_context.process_table();
@@ -760,14 +760,7 @@ impl ProcessHandle {
 
         let mut buf = vec![0; count];
 
-        let n_read = match active_context.sys.vfs.read_file(in_file_id, &mut buf)? {
-            Some(n) => n,
-            None => {
-                // Reading would block
-                return Ok(None);
-            }
-        };
-
+        let n_read = active_context.sys.vfs.read_file(in_file_id, &mut buf)?;
         let n_written = active_context
             .sys
             .vfs
@@ -778,7 +771,7 @@ impl ProcessHandle {
             "Not all data was written. We need to handle this!"
         );
 
-        Ok(Some(n_read))
+        Ok(n_read)
     }
 
     pub fn sc_seek(&self, fd: Fd, offset: SeekOffset) -> SysResult<()> {
@@ -1139,13 +1132,13 @@ mod tests {
         proc.sc_write(fd, &[0, 10, 20, 30]).unwrap();
         let buf = &mut [0, 0];
         proc.sc_seek(fd, SeekOffset::Set(1)).unwrap();
-        let mut n = proc.sc_read(fd, buf).unwrap().unwrap();
+        let mut n = proc.sc_read(fd, buf).unwrap();
         assert_eq!(buf, &[10, 20]);
         assert_eq!(n, 2);
-        n = proc.sc_read(fd, buf).unwrap().unwrap();
+        n = proc.sc_read(fd, buf).unwrap();
         assert_eq!(buf, &[30, 20]);
         assert_eq!(n, 1);
-        n = proc.sc_read(fd, buf).unwrap().unwrap();
+        n = proc.sc_read(fd, buf).unwrap();
         assert_eq!(n, 0);
     }
 
