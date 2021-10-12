@@ -1,7 +1,9 @@
 use crate::pipefs::PipeFilesystem;
 use crate::procfs::ProcFilesystem;
 use crate::regularfs::RegularFilesystem;
-use crate::sys::{GlobalProcessTable, IoctlRequest, OpenFlags, Process, GLOBAL_PROCESS_TABLE};
+use crate::sys::{
+    GlobalProcessTable, IoctlRequest, OpenFlags, Process, SeekOffset, GLOBAL_PROCESS_TABLE,
+};
 use crate::util::{
     DirectoryEntry, Ecode, FilePermissions, FileStat, FileType, FilesystemId, Ino, Inode,
     InodeIdentifier, OpenFileId, SysResult,
@@ -497,8 +499,21 @@ impl VirtualFilesystemSwitch {
         Ok(n_read)
     }
 
-    pub fn seek(&mut self, open_file_id: OpenFileId, offset: usize) -> SysResult<()> {
-        self.get_open_file_mut(open_file_id).offset = offset;
+    pub fn seek(&mut self, open_file_id: OpenFileId, offset: SeekOffset) -> SysResult<()> {
+        match offset {
+            SeekOffset::Set(offset) => {
+                let mut open_file = self.get_open_file_mut(open_file_id);
+                open_file.offset = offset;
+            }
+            SeekOffset::End(relative_offset) => {
+                let inode_id = self.get_open_file_mut(open_file_id).inode_id;
+                let fs = self.fs.get_mut(&inode_id.filesystem_id).unwrap();
+                let size = fs.inode(inode_id.number).unwrap().size;
+                let offset = (size as i64 + relative_offset) as usize;
+                let mut open_file = self.get_open_file_mut(open_file_id);
+                open_file.offset = offset;
+            }
+        }
         Ok(())
     }
 

@@ -11,7 +11,9 @@ pub mod echo;
 pub mod file;
 pub mod file_helpers;
 pub mod pipedemo;
+pub mod repeat;
 pub mod shell;
+pub mod tail;
 pub mod utils;
 pub mod wc;
 
@@ -29,6 +31,8 @@ pub fn add_program_files_to_bin_dir(handle: &mut ProcessHandle) {
     create_program_file(handle, "pipedemo").unwrap();
     create_program_file(handle, "echo").unwrap();
     create_program_file(handle, "wc").unwrap();
+    create_program_file(handle, "tail").unwrap();
+    create_program_file(handle, "repeat").unwrap();
 }
 
 fn create_program_file(handle: &mut ProcessHandle, program_name: &str) -> SysResult<()> {
@@ -85,6 +89,8 @@ pub fn run_program(handle: ProcessHandle) {
             Ok("pipedemo\n") => pipedemo::run(handle, args),
             Ok("echo\n") => echo::run(handle, args),
             Ok("wc\n") => wc::run(handle, args),
+            Ok("tail\n") => tail::run(handle, args),
+            Ok("repeat\n") => repeat::run(handle, args),
             _ => {
                 eprintln!("Not a valid executable: {}. ({:?})", name, rest);
                 handle.sc_exit(2);

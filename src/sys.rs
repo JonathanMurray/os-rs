@@ -9,8 +9,9 @@ use once_cell::sync::Lazy;
 
 use std::collections::{hash_map, HashMap, LinkedList};
 use std::fmt::Display;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub struct ProcessWasKilledPanic;
 
@@ -270,6 +271,7 @@ impl System {
             shared_sys: sys,
             pid,
             signal_handlers: Default::default(),
+            has_died: AtomicBool::new(false),
         }
     }
 
@@ -287,6 +289,13 @@ pub struct ProcessHandle {
     shared_sys: Arc<Mutex<System>>,
     pid: Pid,
     signal_handlers: Mutex<HashMap<Signal, Box<dyn SignalHandler>>>,
+
+    // Used to ensure that we don't interact with the handle after
+    // the process has exited. That could happen if a process is
+    // killed while holding onto a RAII (like FileReader) which
+    // would try to close FD's after the process has already been
+    // removed from the global process table.
+    has_died: AtomicBool,
 }
 
 impl ProcessHandle {
@@ -298,6 +307,25 @@ impl ProcessHandle {
 
     pub fn pid(&self) -> Pid {
         self.pid
+    }
+
+    pub fn has_died(&self) -> bool {
+        self.has_died.load(Ordering::Relaxed)
+    }
+
+    pub fn sc_nanosleep(&self, duration: Duration) -> SysResult<()> {
+        let end = Instant::now() + duration;
+
+        while Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+            let active_handle = ActiveProcessHandle::new(self);
+            if self._handle_signals(active_handle) {
+                // Receiving a signal interrupts the syscall
+                return Err(Ecode::Eintr);
+            }
+        }
+
+        Ok(())
     }
 
     pub fn sc_pipe(&self) -> SysResult<(Fd, Fd)> {
@@ -351,6 +379,7 @@ impl ProcessHandle {
                 match signal {
                     Signal::Kill | Signal::Interrupt => {
                         process.zombify(ProcessResult::Killed(signal));
+                        self.has_died.store(true, Ordering::Relaxed);
 
                         let fds = process.take_fds().into_values();
 
@@ -486,6 +515,7 @@ impl ProcessHandle {
         let proc = processes.current();
         proc.log.push(format!("exit({})", code));
         proc.zombify(ProcessResult::ExitCode(code));
+        self.has_died.store(true, Ordering::Relaxed);
 
         let fds = proc.take_fds().into_values();
 
@@ -751,11 +781,11 @@ impl ProcessHandle {
         Ok(Some(n_read))
     }
 
-    pub fn sc_seek(&self, fd: Fd, offset: usize) -> SysResult<()> {
+    pub fn sc_seek(&self, fd: Fd, offset: SeekOffset) -> SysResult<()> {
         let mut active_context = ActiveProcessHandle::new(self);
         let mut processes = active_context.process_table();
         let proc = processes.current();
-        proc.log.push(format!("seek({}, {})", fd, offset));
+        proc.log.push(format!("seek({}, {:?})", fd, offset));
         let open_file_id = proc.find_open_file(fd)?;
 
         // unlock process table before calling VFS
@@ -943,6 +973,12 @@ bitflags! {
     }
 }
 
+#[derive(Debug)]
+pub enum SeekOffset {
+    Set(usize),
+    End(i64),
+}
+
 struct ActiveProcessHandle<'a> {
     pid: Pid,
     sys: MutexGuard<'a, System>,
@@ -1102,7 +1138,7 @@ mod tests {
         let fd = proc.sc_open("/myfile", OpenFlags::READ_ONLY, None).unwrap();
         proc.sc_write(fd, &[0, 10, 20, 30]).unwrap();
         let buf = &mut [0, 0];
-        proc.sc_seek(fd, 1).unwrap();
+        proc.sc_seek(fd, SeekOffset::Set(1)).unwrap();
         let mut n = proc.sc_read(fd, buf).unwrap().unwrap();
         assert_eq!(buf, &[10, 20]);
         assert_eq!(n, 2);

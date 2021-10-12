@@ -1,4 +1,4 @@
-use crate::sys::{OpenFlags, ProcessHandle};
+use crate::sys::{OpenFlags, ProcessHandle, SeekOffset};
 use crate::util::{FilePermissions, SysResult};
 
 use std::time::Duration;
@@ -22,7 +22,8 @@ pub fn run_background_proc(mut sys: ProcessHandle) {
         std::thread::sleep(Duration::from_secs(1));
         secs += 1;
         {
-            sys.sc_seek(fd, 0).expect("seek in uptime file");
+            sys.sc_seek(fd, SeekOffset::Set(0))
+                .expect("seek in uptime file");
             sys.sc_write(
                 fd,
                 format!("System has been running for {} seconds.\n", secs).as_bytes(),

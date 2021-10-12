@@ -1,4 +1,4 @@
-use crate::sys::{OpenFlags, ProcessHandle};
+use crate::sys::{OpenFlags, ProcessHandle, SeekOffset};
 use crate::util::{Ecode, Fd, FileStat, SysResult};
 
 pub struct FileReader<'a> {
@@ -47,14 +47,29 @@ impl<'a> FileReader<'a> {
             .map(|content| String::from_utf8_lossy(&content).to_string())
     }
 
+    pub fn seek(&mut self, offset: SeekOffset) -> SysResult<()> {
+        self.handle.sc_seek(self.fd.unwrap(), offset)
+    }
+
     pub fn close(mut self) {
         self._ensure_closed()
     }
 
     pub fn _ensure_closed(&mut self) {
+        if self.handle.has_died() {
+            // Interacting with the handle after the process has died
+            // causes a crash. Ideally this would be preventd by
+            // the type-system, but making the handle functions require
+            // a mutable reference caused lots of headaches.
+            eprintln!("[file reader] process has died. Will not try to close");
+            return;
+        }
+
         if let Some(fd) = self.fd.take() {
             if let Err(e) = self.handle.sc_close(fd) {
-                println!("WARN: Failed to close {} (fd: {}): {}", self.path, fd, e);
+                // This can happen naturally if a process is killed from a signal
+                // while owning this file
+                eprintln!("WARN: Failed to close {} (fd: {}): {}", self.path, fd, e);
             }
         }
     }
