@@ -91,7 +91,7 @@ impl TerminalDriver {
 
                 Key::Ctrl('d') => {
                     write!(stdout, "^D").unwrap();
-                    if self.line.input().is_empty() {
+                    if self.line.input_len() == 0 {
                         // This effectively signals EOF to the foreground process
                         self.to_kernel.feed_bytes(vec![]);
                     }
@@ -128,7 +128,7 @@ impl TerminalDriver {
                     write!(
                         stdout,
                         "{}",
-                        cursor::Goto(self.line.get().len() as u16 + 1, line_number),
+                        cursor::Goto(self.line.len() as u16 + 1, line_number),
                     )
                     .unwrap();
                 }
@@ -144,7 +144,7 @@ impl TerminalDriver {
                 }
                 Key::Backspace => {
                     if self.line.backspace() {
-                        redraw_line(stdout, self.line.get(), self.line.pos() as u16);
+                        redraw_line(stdout, &self.line, self.line.pos() as u16);
                     }
                 }
                 Key::Char('\t') => {
@@ -160,7 +160,7 @@ impl TerminalDriver {
 
                 Key::Char(ch) => {
                     self.line.char(ch);
-                    redraw_line(stdout, self.line.get(), self.line.pos() as u16);
+                    redraw_line(stdout, &self.line, self.line.pos() as u16);
                 }
 
                 _ => {
@@ -203,8 +203,9 @@ impl TerminalDriver {
     }
 }
 
-fn redraw_line(stdout: &mut RawTerminal<std::io::Stdout>, line: &str, cursor_pos: u16) {
+fn redraw_line(stdout: &mut RawTerminal<std::io::Stdout>, line: &CurrentLine, cursor_pos: u16) {
     let line_number = termion::terminal_size().unwrap().1;
+    let line: String = line.chars.iter().collect();
     // note: cursor positions are 1-indexed
     write!(
         stdout,
@@ -218,7 +219,7 @@ fn redraw_line(stdout: &mut RawTerminal<std::io::Stdout>, line: &str, cursor_pos
 }
 
 struct CurrentLine {
-    s: String,
+    chars: Vec<char>,
     pos: usize,
     // If the line starts with a shell prompt, we're not allowed to edit that
     input_start_pos: usize,
@@ -227,14 +228,14 @@ struct CurrentLine {
 impl CurrentLine {
     fn new() -> Self {
         Self {
-            s: Default::default(),
+            chars: Default::default(),
             pos: 0,
             input_start_pos: 0,
         }
     }
 
-    fn get(&self) -> &str {
-        &self.s[..]
+    fn len(&self) -> usize {
+        self.chars.len()
     }
 
     fn pos(&self) -> usize {
@@ -243,7 +244,7 @@ impl CurrentLine {
 
     fn backspace(&mut self) -> bool {
         if self.pos > self.input_start_pos {
-            self.s.remove(self.pos - 1);
+            self.chars.remove(self.pos - 1);
             self.pos -= 1;
             true
         } else {
@@ -256,7 +257,7 @@ impl CurrentLine {
     }
 
     fn end(&mut self) {
-        self.pos = self.s.len()
+        self.pos = self.chars.len()
     }
 
     fn left(&mut self) -> bool {
@@ -269,7 +270,7 @@ impl CurrentLine {
     }
 
     fn right(&mut self) -> bool {
-        if self.pos < self.s.len() {
+        if self.pos < self.chars.len() {
             self.pos += 1;
             true
         } else {
@@ -278,38 +279,31 @@ impl CurrentLine {
     }
 
     fn char(&mut self, ch: char) {
-        //TODO:
-        //BUG: We seem to only handle ascii. Input two non-ascii chars
-        // and get assertion failed: self.is_char_boundary(idx)
-        self.s.insert(self.pos, ch);
+        self.chars.insert(self.pos, ch);
         self.pos += 1;
     }
 
     fn new_line(&mut self) -> String {
-        self.s.push('\n');
-        self.take_input()
-    }
-
-    fn take_input(&mut self) -> String {
-        let line = std::mem::take(&mut self.s);
+        self.chars.push('\n');
+        let line = std::mem::take(&mut self.chars);
         let input = &line[self.input_start_pos..];
         self.reset();
-        input.to_string()
+        input.iter().collect()
     }
 
-    fn input(&self) -> &str {
-        &self.s[self.input_start_pos..]
+    fn input_len(&self) -> usize {
+        self.chars[self.input_start_pos..].len()
     }
 
     fn reset(&mut self) {
-        self.s.clear();
+        self.chars.clear();
         self.input_start_pos = 0;
         self.pos = self.input_start_pos;
     }
 
     fn set_from_output(&mut self, output: String) {
-        self.s = output;
-        self.input_start_pos = self.s.len();
+        self.chars = output.chars().collect();
+        self.input_start_pos = self.chars.len();
         self.pos = self.input_start_pos;
     }
 }
