@@ -295,8 +295,6 @@ impl VirtualFilesystemSwitch {
 
         let fs = self.fs.get_mut(&inode_id.filesystem_id).unwrap();
 
-        //TODO do we need to delegate this, or is it enough that the
-        //VFS keeps track of open files?
         fs.open(inode_id.number, open_file_id, access_mode).unwrap();
         Ok(fd_reference)
     }
@@ -312,9 +310,6 @@ impl VirtualFilesystemSwitch {
             filesystem_id: FilesystemId::Pipe,
             number: inode_number,
         };
-
-        //TODO This is all weird. Pipefs doesn't care about us
-        // opening / closing the pipe
 
         // Set up the read-end
         let read_id = self.next_open_file_id;

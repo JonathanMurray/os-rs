@@ -1,12 +1,10 @@
 use std::cmp;
 use std::collections::HashMap;
 
-use crate::sys::IoctlRequest;
+use crate::filesystems::{AccessMode, Filesystem, WriteError};
 use crate::util::{
-    DirectoryEntry, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier,
-    OpenFileId, Uid,
+    FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier, OpenFileId, Uid,
 };
-use crate::filesystems::{AccessMode, WriteError, Filesystem};
 
 const ROOT_INODE_NUMBER: Ino = 0;
 
@@ -85,6 +83,13 @@ impl Filesystem for PipeFilesystem {
         }
     }
 
+    fn inode(&self, inode_number: Ino) -> Option<Inode> {
+        self.pipes
+            .get(&inode_number)
+            .map(|(inode, _pipe)| inode)
+            .copied()
+    }
+
     fn pipe(&mut self) -> Result<Ino> {
         let pipe = Pipe::new();
         let ino = self.next_inode_number;
@@ -107,60 +112,6 @@ impl Filesystem for PipeFilesystem {
         self.next_inode_number += 1;
         Ok(ino)
     }
-
-    fn ioctl(&mut self, _inode_number: Ino, _req: IoctlRequest) -> Result<()> {
-        Err("ioctl not supported".to_owned())
-    }
-
-    fn create(
-        &mut self,
-        _parent_directory: InodeIdentifier,
-        _file_type: FileType,
-        _permissions: FilePermissions,
-    ) -> Result<Ino> {
-        Err("pipefs does not support creating files".to_owned())
-    }
-
-    fn truncate(&mut self, _inode_number: Ino) -> Result<()> {
-        Err("pipefs does not support truncating files".to_owned())
-    }
-
-    fn remove(&mut self, _inode_number: Ino) -> Result<()> {
-        Err("Pipes are automatically removed when both ends are closed".to_owned())
-        //self.pipes
-        //    .remove(&inode_number)
-        //    .map(|_| ())
-        //    .ok_or_else(|| "no pipe with that id".to_owned())
-    }
-
-    fn inode(&self, inode_number: Ino) -> Option<Inode> {
-        self.pipes
-            .get(&inode_number)
-            .map(|(inode, _pipe)| inode)
-            .copied()
-    }
-
-    fn add_directory_entry(
-        &mut self,
-        _directory: Ino,
-        _name: String,
-        _child: InodeIdentifier,
-    ) -> Result<()> {
-        Err("pipefs does not support directories".to_owned())
-    }
-
-    fn remove_directory_entry(&mut self, _directory: Ino, _child: InodeIdentifier) -> Result<()> {
-        Err("pipefs does not support directories".to_owned())
-    }
-
-    fn directory_entries(&mut self, _directory: Ino) -> Result<Vec<DirectoryEntry>> {
-        Err("pipefs does not support directories".to_owned())
-    }
-
-    fn update_inode_parent(&mut self, _inode_number: Ino, _new_parent: InodeIdentifier) -> bool {
-        false
-    }
-
     fn open(&mut self, inode_number: Ino, id: OpenFileId, access_mode: AccessMode) -> Result<()> {
         eprintln!(
             "pipefs open {:?}, {:?}, {:?}",

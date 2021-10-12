@@ -142,23 +142,6 @@ impl Filesystem for DevFilesystem {
         }
     }
 
-    fn create(
-        &mut self,
-        _parent_directory: InodeIdentifier,
-        _file_type: FileType,
-        _permissions: FilePermissions,
-    ) -> Result<Ino> {
-        Err("Can't create file on devfs".to_owned())
-    }
-
-    fn truncate(&mut self, _inode_number: Ino) -> Result<()> {
-        Err("Can't truncate file on devfs".to_owned())
-    }
-
-    fn remove(&mut self, _inode_number: Ino) -> Result<()> {
-        Err("Can't remove file on devfs".to_owned())
-    }
-
     fn inode(&self, inode_number: Ino) -> Option<Inode> {
         if inode_number == INO_ROOT {
             Some(self.root_inode)
@@ -167,19 +150,6 @@ impl Filesystem for DevFilesystem {
         } else {
             None
         }
-    }
-
-    fn add_directory_entry(
-        &mut self,
-        _directory: Ino,
-        _name: String,
-        _child: InodeIdentifier,
-    ) -> Result<()> {
-        Err("Can't add directory entry on devfs".to_owned())
-    }
-
-    fn remove_directory_entry(&mut self, _directory: Ino, _child: InodeIdentifier) -> Result<()> {
-        Err("Can't remove directory entry on devfs".to_owned())
     }
 
     fn directory_entries(&mut self, directory: Ino) -> Result<Vec<DirectoryEntry>> {
@@ -212,10 +182,6 @@ impl Filesystem for DevFilesystem {
         } else {
             Err("no such inode".to_owned())
         }
-    }
-
-    fn update_inode_parent(&mut self, _inode_number: Ino, _new_parent: InodeIdentifier) -> bool {
-        panic!("We shouldn't get here? devfs update_inode_parent")
     }
 
     fn open(&mut self, inode_number: Ino, id: OpenFileId, _access_mode: AccessMode) -> Result<()> {

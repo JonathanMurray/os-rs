@@ -3,12 +3,12 @@ use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use std::sync::MutexGuard;
 
-use crate::sys::{GlobalProcessTable, IoctlRequest, GLOBAL_PROCESS_TABLE};
+use crate::filesystems::{AccessMode, Filesystem, WriteError};
+use crate::sys::{GlobalProcessTable, GLOBAL_PROCESS_TABLE};
 use crate::util::{
     DirectoryEntry, Ecode, FilePermissions, FileType, FilesystemId, Ino, Inode, InodeIdentifier,
     OpenFileId, Uid,
 };
-use crate::filesystems::{AccessMode, WriteError, Filesystem};
 
 type Directory = HashMap<String, InodeIdentifier>;
 type RegularFile = Vec<u8>;
@@ -89,19 +89,54 @@ impl RegularFilesystem {
         }
     }
 
-    fn create_inode(
+    fn dir_mut(&mut self, inode_number: Ino) -> Result<&mut Directory> {
+        match self
+            .files
+            .get_mut(&inode_number)
+            .map(|file| &mut file.content)
+        {
+            Some(FileContent::Dir(dir)) => Ok(dir),
+            Some(FileContent::Regular(_)) => Err("not a directory".to_owned()),
+            None => Err("No such inode".to_owned()),
+        }
+    }
+
+    fn dir(&self, inode_number: Ino) -> Result<&Directory> {
+        match self.files.get(&inode_number).map(|file| &file.content) {
+            Some(FileContent::Dir(dir)) => Ok(dir),
+            Some(FileContent::Regular(_)) => Err("not a directory".to_owned()),
+            None => Err("No such inode".to_owned()),
+        }
+    }
+
+    fn inode_mut(&mut self, inode_number: Ino) -> Option<&mut Inode> {
+        self.inodes.get_mut(&inode_number)
+    }
+}
+
+type Result<T> = std::result::Result<T, String>;
+
+impl Filesystem for RegularFilesystem {
+    fn root_inode_id(&self) -> InodeIdentifier {
+        InodeIdentifier {
+            filesystem_id: FilesystemId::Main,
+            number: ROOT_INODE_NUMBER,
+        }
+    }
+
+    fn create(
         &mut self,
+        parent_directory: InodeIdentifier,
         file_type: FileType,
         permissions: FilePermissions,
-        parent_id: InodeIdentifier,
-    ) -> Ino {
+    ) -> Result<Ino> {
         let mut processes = lock_global_process_table();
         let user_id = processes.current().uid;
 
         let inode_number = self.next_inode_number;
         self.next_inode_number += 1;
         let inode = Inode {
-            parent_id,
+            parent_id: parent_directory,
             id: InodeIdentifier {
                 filesystem_id: FilesystemId::Main,
                 number: inode_number,
@@ -114,10 +149,21 @@ impl RegularFilesystem {
         self.inodes.insert(inode_number, inode);
         self.files.insert(inode_number, File::new(file_type));
 
-        inode_number
+        Ok(inode_number)
     }
 
-    fn remove_inode(&mut self, inode_number: Ino) -> Result<()> {
+    fn truncate(&mut self, inode_number: Ino) -> Result<()> {
+        let file = self.files.get_mut(&inode_number).unwrap();
+        match &mut file.content {
+            FileContent::Regular(regular_file) => {
+                regular_file.clear();
+                Ok(())
+            }
+            FileContent::Dir(_) => Err("Cannot truncate dir".to_owned()),
+        }
+    }
+
+    fn remove(&mut self, inode_number: Ino) -> Result<()> {
         //TODO remove directory / regular file
         //TODO if someone has an open file, don't delete it in such a way that
         // read/writes start failing for that process
@@ -131,57 +177,29 @@ impl RegularFilesystem {
         }
     }
 
-    fn directory_mut(&mut self, inode_number: Ino) -> Result<&mut Directory> {
-        match self
-            .files
-            .get_mut(&inode_number)
-            .map(|file| &mut file.content)
-        {
-            Some(FileContent::Dir(dir)) => Ok(dir),
-            Some(FileContent::Regular(_)) => Err("not a directory".to_owned()),
-            None => Err("No such inode".to_owned()),
-        }
+    fn inode(&self, inode_number: Ino) -> Option<Inode> {
+        self.inodes.get(&inode_number).copied()
     }
 
-    fn directory(&self, inode_number: Ino) -> Result<&Directory> {
-        match self.files.get(&inode_number).map(|file| &file.content) {
-            Some(FileContent::Dir(dir)) => Ok(dir),
-            Some(FileContent::Regular(_)) => Err("not a directory".to_owned()),
-            None => Err("No such inode".to_owned()),
-        }
-    }
-
-    fn add_child_to_directory(
+    fn add_directory_entry(
         &mut self,
-        dir_inode_number: Ino,
+        directory: Ino,
         name: String,
-        child_inode_id: InodeIdentifier,
+        child: InodeIdentifier,
     ) -> Result<()> {
-        let dir = self.directory_mut(dir_inode_number)?;
-        dir.insert(name, child_inode_id);
+        let dir = self.dir_mut(directory)?;
+        dir.insert(name, child);
         Ok(())
     }
 
-    fn remove_child_from_directory(
-        &mut self,
-        dir_inode_number: Ino,
-        child_inode_id: InodeIdentifier,
-    ) -> Result<()> {
-        let dir = self.directory_mut(dir_inode_number)?;
-        dir.retain(|_name, child_id| *child_id != child_inode_id);
+    fn remove_directory_entry(&mut self, directory: Ino, child: InodeIdentifier) -> Result<()> {
+        let dir = self.dir_mut(directory)?;
+        dir.retain(|_name, child_id| *child_id != child);
         Ok(())
     }
 
-    fn update_inode_parent(&mut self, inode_number: Ino, new_parent_id: InodeIdentifier) -> bool {
-        if let Some(mut inode) = self.inode_mut(inode_number) {
-            inode.parent_id = new_parent_id;
-            return true;
-        }
-        false
-    }
-
-    fn list_directory(&mut self, inode_number: Ino) -> Result<Vec<DirectoryEntry>> {
-        let dir = self.directory(inode_number)?;
+    fn directory_entries(&mut self, directory: Ino) -> Result<Vec<DirectoryEntry>> {
+        let dir = self.dir(directory)?;
         let listing = dir
             .iter()
             .map(|(name, id)| DirectoryEntry {
@@ -192,7 +210,15 @@ impl RegularFilesystem {
         Ok(listing)
     }
 
-    fn open_file(&mut self, inode_number: Ino, id: OpenFileId) -> Result<()> {
+    fn update_inode_parent(&mut self, inode_number: Ino, new_parent: InodeIdentifier) -> bool {
+        if let Some(mut inode) = self.inode_mut(inode_number) {
+            inode.parent_id = new_parent;
+            return true;
+        }
+        false
+    }
+
+    fn open(&mut self, inode_number: Ino, id: OpenFileId, _access_mode: AccessMode) -> Result<()> {
         let file = self.files.get_mut(&inode_number).ok_or(Ecode::Enoent)?;
 
         assert!(
@@ -206,7 +232,7 @@ impl RegularFilesystem {
         Ok(())
     }
 
-    fn close_file(&mut self, id: OpenFileId) {
+    fn close(&mut self, id: OpenFileId) {
         for file in self.files.values_mut() {
             file.open_ids.retain(|open_id| *open_id != id);
         }
@@ -214,9 +240,10 @@ impl RegularFilesystem {
         eprintln!("Closed id {:?}", id);
     }
 
-    fn read_file_at_offset(
+    fn read(
         &mut self,
         inode_number: Ino,
+        _id: OpenFileId,
         buf: &mut [u8],
         file_offset: usize,
     ) -> Result<Option<usize>> {
@@ -232,14 +259,12 @@ impl RegularFilesystem {
         }
     }
 
-    fn write_file_at_offset(
+    fn write(
         &mut self,
         inode_number: Ino,
         buf: &[u8],
-        mut file_offset: usize,
-    ) -> Result<usize> {
-        //TODO permissions
-
+        file_offset: usize,
+    ) -> std::result::Result<usize, WriteError> {
         match self
             .files
             .get_mut(&inode_number)
@@ -247,6 +272,7 @@ impl RegularFilesystem {
         {
             Some(FileContent::Regular(f)) => {
                 let mut num_written = 0;
+                let mut file_offset = file_offset;
                 for &b in buf {
                     if file_offset < f.len() {
                         f[file_offset] = b;
@@ -263,108 +289,8 @@ impl RegularFilesystem {
 
                 Ok(num_written)
             }
-            Some(FileContent::Dir(_)) => Err("Is directory".to_owned()),
-            None => Err("No such file".to_owned()),
+            Some(FileContent::Dir(_)) => Err(WriteError::Unexpected("Is directory".to_owned())),
+            None => Err(WriteError::Unexpected("No such file".to_owned())),
         }
-    }
-
-    fn inode_mut(&mut self, inode_number: Ino) -> Option<&mut Inode> {
-        self.inodes.get_mut(&inode_number)
-    }
-
-    fn inode(&self, inode_number: Ino) -> Option<Inode> {
-        self.inodes.get(&inode_number).copied()
-    }
-}
-
-type Result<T> = std::result::Result<T, String>;
-
-impl Filesystem for RegularFilesystem {
-    fn root_inode_id(&self) -> InodeIdentifier {
-        InodeIdentifier {
-            filesystem_id: FilesystemId::Main,
-            number: ROOT_INODE_NUMBER,
-        }
-    }
-
-    fn ioctl(&mut self, _inode_number: Ino, _req: IoctlRequest) -> Result<()> {
-        Err("ioctl not supported".to_owned())
-    }
-
-    fn create(
-        &mut self,
-        parent_directory: InodeIdentifier,
-        file_type: FileType,
-        permissions: FilePermissions,
-    ) -> Result<Ino> {
-        Ok(self.create_inode(file_type, permissions, parent_directory))
-    }
-
-    fn truncate(&mut self, inode_number: Ino) -> Result<()> {
-        let file = self.files.get_mut(&inode_number).unwrap();
-        match &mut file.content {
-            FileContent::Regular(regular_file) => {
-                regular_file.clear();
-                Ok(())
-            }
-            FileContent::Dir(_) => Err("Cannot truncate dir".to_owned()),
-        }
-    }
-
-    fn remove(&mut self, inode_number: Ino) -> Result<()> {
-        self.remove_inode(inode_number)
-    }
-
-    fn inode(&self, inode_number: Ino) -> Option<Inode> {
-        self.inode(inode_number)
-    }
-
-    fn add_directory_entry(
-        &mut self,
-        directory: Ino,
-        name: String,
-        child: InodeIdentifier,
-    ) -> Result<()> {
-        self.add_child_to_directory(directory, name, child)
-    }
-
-    fn remove_directory_entry(&mut self, directory: Ino, child: InodeIdentifier) -> Result<()> {
-        self.remove_child_from_directory(directory, child)
-    }
-
-    fn directory_entries(&mut self, directory: Ino) -> Result<Vec<DirectoryEntry>> {
-        self.list_directory(directory)
-    }
-
-    fn update_inode_parent(&mut self, inode_number: Ino, new_parent: InodeIdentifier) -> bool {
-        self.update_inode_parent(inode_number, new_parent)
-    }
-
-    fn open(&mut self, inode_number: Ino, id: OpenFileId, _access_mode: AccessMode) -> Result<()> {
-        self.open_file(inode_number, id)
-    }
-
-    fn close(&mut self, id: OpenFileId) {
-        self.close_file(id)
-    }
-
-    fn read(
-        &mut self,
-        inode_number: Ino,
-        _id: OpenFileId,
-        buf: &mut [u8],
-        file_offset: usize,
-    ) -> Result<Option<usize>> {
-        self.read_file_at_offset(inode_number, buf, file_offset)
-    }
-
-    fn write(
-        &mut self,
-        inode_number: Ino,
-        buf: &[u8],
-        file_offset: usize,
-    ) -> std::result::Result<usize, WriteError> {
-        self.write_file_at_offset(inode_number, buf, file_offset)
-            .map_err(WriteError::Unexpected)
     }
 }
